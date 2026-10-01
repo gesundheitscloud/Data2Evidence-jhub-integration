@@ -1,6 +1,6 @@
 msal==1.31.0
 pandas==2.2.3
-PyJWT==2.13.0
+PyJWT==2.15.0
 python-dotenv==1.2.2
 PyYAML==6.0.2
 requests==2.33.0
