@@ -7,7 +7,8 @@ import {
   DashboardViewerService,
   JobRunnerService,
   StudyResultService,
-  ETLMappingContributorService
+  ETLMappingContributorService,
+  JupyterUserService
 } from '../services'
 import { createLogger } from '../Logger'
 import { User } from '../entities'
@@ -22,7 +23,8 @@ export class AlpUserRouter {
     private readonly dashboardViewerService: DashboardViewerService,
     private readonly jobRunnerService: JobRunnerService,
     private readonly studyResultService: StudyResultService,
-    private readonly etlMappingContributorService: ETLMappingContributorService
+    private readonly etlMappingContributorService: ETLMappingContributorService,
+    private readonly jupyterUserService: JupyterUserService
   ) {
     this.registerRoutes()
   }
@@ -35,7 +37,8 @@ export class AlpUserRouter {
       try {
         const userAdmins = await this.userAdminService.getUsers()
         this.mergeUserWithRoles(alpUsers, userAdmins, ROLES.ALP_USER_ADMIN)
-
+        const jupyterUsers = await this.jupyterUserService.getUsers()
+        this.mergeUserWithRoles(alpUsers, jupyterUsers, ROLES.JUPYTER_USER)
         return res.status(200).json(Object.values(alpUsers))
       } catch (err) {
         this.logger.error(`Error when getting ALP users: ${JSON.stringify(err)}`)
@@ -66,6 +69,9 @@ export class AlpUserRouter {
         }
         if (roles.includes(ROLES.ETL_MAPPING_CONTRIBUTOR)) {
           await this.etlMappingContributorService.registerUser(userId)
+        }
+        if (roles.includes(ROLES.JUPYTER_USER)) {
+          await this.jupyterUserService.registerUser(userId)
         }
 
         return res.status(200).json({ userId })
@@ -98,6 +104,9 @@ export class AlpUserRouter {
         }
         if (roles.includes(ROLES.ETL_MAPPING_CONTRIBUTOR)) {
           await this.etlMappingContributorService.withdrawUser(userId)
+        }
+        if (roles.includes(ROLES.JUPYTER_USER)) {
+          await this.jupyterUserService.withdrawUser(userId)
         }
 
         return res.status(200).json({ userId })

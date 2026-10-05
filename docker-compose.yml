@@ -771,6 +771,13 @@ services:
           }
 
           # Logto api server
+          # `/sign-in` used to be the public login entry while Logto was the
+          # primary IdP. A bare visit must now land on the Trex login page.
+          # Keep query-bearing `/sign-in?...` requests below for the optional
+          # Logto federation flow, where the query identifies the interaction.
+          @bare_sign_in expression `{http.request.uri.path} == "/sign-in" && {http.request.uri.query} == ""`
+          redir @bare_sign_in /d2e-login/ 302
+
           @logto {
             path /api/*
             path /oidc/*
@@ -1467,4 +1474,3 @@ services:
       alp:
       data:
     profiles: [hana]
-

@@ -127,6 +127,29 @@ export const getDbCredentialsByCode = (databaseCode: string): {
   return null;
 };
 
+export const getJupyterDatabaseCodes = (): Set<string> =>
+  new Set(
+    (_env.JUPYTER__DATABASE_CODES || "")
+      .split(",")
+      .map((code) => code.trim())
+      .filter(Boolean),
+  );
+
+export const getJupyterConnectionByCode = (databaseCode: string): {
+  host: string;
+  port: number | string;
+  database: string;
+} | null => {
+  if (!getJupyterDatabaseCodes().has(databaseCode)) return null;
+  const credentials = getDbCredentialsByCode(databaseCode);
+  if (!credentials || credentials.dialect !== "postgresql") return null;
+  return {
+    host: credentials.host,
+    port: credentials.port,
+    database: credentials.database,
+  };
+};
+
 export const toUpperCaseIfHana = (str: string, dialect: string | undefined): string => {
   if (dialect === "hana") {
     return str.toUpperCase();

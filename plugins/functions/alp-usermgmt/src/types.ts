@@ -12,6 +12,7 @@ type RoleTypeOf<T> = {
   ALP_USER_ADMIN: boolean
   ALP_SYSTEM_ADMIN: boolean
   ALP_DASHBOARD_VIEWER: boolean
+  JUPYTER_USER: boolean
   STUDY_WRITE_DQD_RESEARCHER: boolean
   STUDY_RESULTS_READ_RESEARCHER: boolean
   ETL_MAPPING_CONTRIBUTOR: boolean
@@ -45,6 +46,7 @@ export interface RoleMap {
   alp_role_user_admin: boolean // alp user admin
   alp_role_system_admin: boolean // alp system admin
   alp_role_dashboard_viewer: boolean // dashboard viewer
+  alp_role_jupyter_user: boolean // may enter JupyterHub
 }
 
 export interface UserGroupMetadata extends RoleMap {

@@ -15,6 +15,10 @@ Deno.test("an unscoped role is stored under its own name", () => {
   assertEquals(canonicalRoleNames("USER_ADMIN", ["USER_ADMIN"]), ["USER_ADMIN"]);
 });
 
+Deno.test("the JupyterHub access role remains an independent entitlement", () => {
+  assertEquals(canonicalRoleNames("role.jupyteruser", ["role.jupyteruser"]), ["role.jupyteruser"]);
+});
+
 Deno.test("kebab scopes become the sec_role names they stood for", () => {
   // Logto rejected spaces in scope names, so d2e stored these hyphenated and a
   // JWT customizer expanded them. trex holds the real names, so they are

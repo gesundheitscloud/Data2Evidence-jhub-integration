@@ -146,6 +146,7 @@ export class MeRouter {
             ...(roleMap.ALP_SYSTEM_ADMIN ? ['ALP_SYSTEM_ADMIN'] : []),
             ...(roleMap.ALP_USER_ADMIN ? ['ALP_USER_ADMIN'] : []),
             ...(roleMap.ALP_DASHBOARD_VIEWER ? ['ALP_DASHBOARD_VIEWER'] : []),
+            ...(roleMap.JUPYTER_USER ? ['JUPYTER_USER'] : []),
             ...(roleMap.STUDY_WRITE_DQD_RESEARCHER ? ['STUDY_WRITE_DQD_RESEARCHER'] : []),
             ...(roleMap.STUDY_RESULTS_READ_RESEARCHER ? ['STUDY_RESULTS_READ_RESEARCHER'] : []),
             ...(roleMap.ETL_MAPPING_CONTRIBUTOR ? ['ETL_MAPPING_CONTRIBUTOR'] : [])

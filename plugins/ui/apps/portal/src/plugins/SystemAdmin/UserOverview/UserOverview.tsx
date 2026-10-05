@@ -16,6 +16,7 @@ import {
   STUDY_WRITE_DQD_RESEARCHER,
   TENANT_ROLES,
   ALP_DASHBOARD_VIEWER,
+  JUPYTER_USER,
   STUDY_RESULTS_READ_RESEARCHER,
   ETL_MAPPING_CONTRIBUTOR,
 } from "../../../config";
@@ -185,6 +186,10 @@ export const UserOverview: FC<UserOverviewProps> = () => {
 
     if (roles.includes(ALP_DASHBOARD_VIEWER)) {
       roleList.push(ALP_ROLES[ALP_DASHBOARD_VIEWER]);
+    }
+
+    if (roles.includes(JUPYTER_USER)) {
+      roleList.push(ALP_ROLES[JUPYTER_USER]);
     }
 
     if (roles.includes(STUDY_WRITE_DQD_RESEARCHER)) {

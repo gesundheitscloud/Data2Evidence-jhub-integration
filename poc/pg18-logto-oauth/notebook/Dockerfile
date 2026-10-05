@@ -18,6 +18,7 @@ RUN apt-get update \
 USER ${NB_UID}
 
 # no [binary]: that bundles an older libpq the hook cannot reach
+# [TODO] lets keep psycopg ... etc lib in requirements.txt for future(psycopg, pandas...etc)
 RUN python3 -m pip install --no-cache-dir "psycopg==3.2.10"
 ENV PSYCOPG_IMPL=python
 COPY pg_oauth.py /opt/conda/lib/python3.13/site-packages/pg_oauth.py

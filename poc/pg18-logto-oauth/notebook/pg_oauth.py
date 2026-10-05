@@ -1,4 +1,4 @@
-# [FLOW-2] in the notebook: picks the PG role from the token's db:* scope and hands the token to libpq 18 via its OAuth hook
+# [FLOW-2] in the notebook: picks the PG role of a granted D2E dataset and hands the token to libpq 18 via its OAuth hook
 """Connect to PostgreSQL 18 with the Logto access token JupyterHub gave this notebook.
 
 No released Python driver speaks PostgreSQL 18's OAuth yet, so this installs libpq's
@@ -6,12 +6,13 @@ own OAuth hook (PQsetAuthDataHook) with ctypes. psycopg must use the same system
 libpq 18, which is why the image sets PSYCOPG_IMPL=python and has no psycopg[binary].
 
     import pg_oauth
-    pg_oauth.scopes()                  # {'db:jupyter_test'}
-    conn = pg_oauth.connect()          # logs in as the role named in the token scope
-    conn.execute("select * from allowed.demo").fetchall()
+    pg_oauth.datasets()                # datasets a D2E admin granted you (Researcher)
+    conn = pg_oauth.connect("demo")    # token_dataset_code or dataset id; optional if only one
+    conn.execute("select * from demo_cdm.person limit 5").fetchall()
 
 The token comes from LOGTO_ACCESS_TOKEN, set by the hub when the server starts.
 It expires after about an hour; restart the server (Hub Control Panel) for a new one.
+New grants also need a server restart: the dataset list is fixed when the server starts.
 """
 import base64
 import ctypes
@@ -23,7 +24,6 @@ import time
 import psycopg
 
 _PQAUTHDATA_OAUTH_BEARER_TOKEN = 1  # PGauthData in libpq-fe.h (18)
-_SCOPE_PREFIX = "db:"               # scope db:<role> lets you log in as <role>
 
 
 class _BearerRequest(ctypes.Structure):
@@ -87,27 +87,64 @@ def scopes():
     return set(claims(token()).get("scope", "").split())
 
 
-def connect(role=None, **kwargs):
-    """psycopg connection as `role`, or as the only role the token's db:* scopes allow."""
+def roles():
+    """Role names carried by the D2E token."""
+    value = claims(token()).get("roles", [])
+    return set(value if isinstance(value, list) else [])
+
+
+def datasets():
+    """Return the D2E datasets granted to this user when the server started."""
+    raw = os.environ.get("D2E_JUPYTER_DATASETS", "[]")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("D2E_JUPYTER_DATASETS is not valid JSON") from exc
+    if not isinstance(value, list):
+        raise RuntimeError("D2E_JUPYTER_DATASETS must be a JSON array")
+    return value
+
+
+def _select_dataset(identifier=None):
+    available = datasets()
+    if not available:
+        raise RuntimeError("no D2E dataset is granted to you; ask a D2E admin for the Researcher role on a dataset, "
+                           "then restart your server from the Hub Control Panel")
+    if identifier is None:
+        if len(available) == 1:
+            return available[0]
+        choices = [item.get("tokenDatasetCode") or item.get("id") for item in available]
+        raise RuntimeError(f"choose a dataset with connect(dataset=...); available datasets: {choices}")
+    matches = [
+        item for item in available
+        if identifier in (item.get("id"), item.get("tokenDatasetCode"))
+    ]
+    if len(matches) != 1:
+        raise RuntimeError(f"dataset {identifier!r} is not available to this user")
+    return matches[0]
+
+
+def connect(dataset=None, **kwargs):
+    """Read-only connection to a granted D2E dataset, logged in as role.researcher.<dataset id>."""
     global _current_token
-    allowed = sorted(s[len(_SCOPE_PREFIX):] for s in scopes() if s.startswith(_SCOPE_PREFIX))
-    if role is None:
-        if len(allowed) != 1:
-            raise RuntimeError(f"choose a role with connect(role=...); the token allows {allowed}")
-        role = allowed[0]
+    connection = _select_dataset(dataset)
+    role = connection["postgresRole"]
+    if role not in roles():
+        raise RuntimeError(f"the access token does not grant dataset role {role}")
     _current_token = token()
     issuer = os.environ["PG_OAUTH_ISSUER"]
     if issuer.startswith("http://"):
         # libpq rejects a plain-HTTP issuer even when the token comes from this hook.
         # Local PoC only; a real deployment uses an HTTPS issuer and never sets this.
         os.environ.setdefault("PGOAUTHDEBUG", "UNSAFE")
-    return psycopg.connect(
-        host=os.environ.get("PGHOST", "pg18"),
-        port=os.environ.get("PGPORT", "5432"),
-        dbname=os.environ.get("PGDATABASE", "poc"),
-        user=role,
-        oauth_issuer=os.environ["PG_OAUTH_ISSUER"],
-        oauth_client_id=os.environ["PG_OAUTH_CLIENT_ID"],
-        autocommit=True,
-        **kwargs,
-    )
+    params = {
+        "host": connection["host"],
+        "port": connection["port"],
+        "dbname": connection["database"],
+        "user": role,
+        "oauth_issuer": issuer,
+        "oauth_client_id": os.environ["PG_OAUTH_CLIENT_ID"],
+        "autocommit": True,
+    }
+    params.update(kwargs)
+    return psycopg.connect(**params)

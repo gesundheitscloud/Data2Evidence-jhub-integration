@@ -1,7 +1,7 @@
-# [RUN] pg18 (official image + mounts) and hub as separate containers on D2E's d2e_alp network + an internal notebook network
-# PoC against the real D2E stack: D2E Logto <-> JupyterHub <-> PostgreSQL 18,
-# three separate containers. D2E must already be running (d2e CLI).
-#   sh run.sh        # sets up Logto, writes .env.poc, then runs this file
+# [RUN] pg18 (official image + mounts), pg18-sync and hub as separate containers on D2E's d2e_alp network + an internal notebook network
+# PoC against the real D2E stack: D2E Logto <-> JupyterHub <-> PostgreSQL 18.
+# D2E must already be running (d2e CLI).
+#   sh run.sh        # sets up Logto + D2E patches, writes .env.poc, then runs this file
 #
 # Tokens from D2E Logto carry iss=http://d2e-caddy:8080/oidc, and its discovery
 # document and JWKS are served at that URL inside the d2e_alp network. So pg18 only
@@ -21,24 +21,49 @@ services:
       - -c
       - hba_file=/etc/postgresql/pg_hba.conf
       - -c
-      - ident_file=/etc/postgresql/pg_ident.conf
-      - -c
       - oauth_validator_libraries=pg_oidc_validator
+      # a token may log in as the role.researcher.<dataset id> roles listed in its `roles` claim
+      - -c
+      - pg_oidc_validator.role_claim=roles
+      - -c
+      - pg_oidc_validator.role_prefix=role.researcher.
+      - -c
+      - pg_oidc_validator.audience=https://alp-default
       - -c
       - log_connections=on
     volumes:
       - pg18-data:/var/lib/postgresql
+      - pg18-socket:/var/run/postgresql
       - ./validator/out/pg_oidc_validator.so:/usr/local/lib/postgresql/pg_oidc_validator.so:ro
       - ./pg18/pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
-      - ./pg18/pg_ident.conf:/etc/postgresql/pg_ident.conf:ro
-      - ./pg18/init:/docker-entrypoint-initdb.d:ro
     networks:
-      alp:         # to reach d2e-caddy:8080 for Logto's discovery document and JWKS
+      alp:         # d2e-caddy:8080 (Logto discovery + JWKS) and the dataset source DBs (FDW)
       notebooks:   # notebooks connect here
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 3s
       retries: 30
+
+  # [FLOW-5] keeps PG18 in line with the D2E datasets (sync/sync.sh): mirror schema + role per dataset
+  pg18-sync:
+    image: postgres:18-alpine
+    container_name: pg18d2e-sync
+    depends_on:
+      pg18:
+        condition: service_healthy
+    entrypoint: ["sh", "/sync/sync.sh"]
+    environment:
+      MINERVA_URL: ${POC_MINERVA_URL:-}
+      SOURCE_DEMO_DATABASE: ${POC_SOURCE_DEMO_DATABASE:-}
+      JUPYTER_READER_PASSWORD: ${POC_JUPYTER_READER_PASSWORD:-}
+      CATALOG_HOST: pg18d2e-pg18
+      CATALOG_PORT: "5432"
+    volumes:
+      - pg18-socket:/var/run/postgresql
+      - catalog:/catalog
+      - ./sync/sync.sh:/sync/sync.sh:ro
+    networks:
+      alp:         # D2E metadata DB and dataset source DBs
 
   # the hub (hub/), pointed at D2E Logto and this PostgreSQL
   jupyterhub:
@@ -58,19 +83,19 @@ services:
       # server to server, the same URL the token's iss names
       LOGTO_TOKEN_URL: http://d2e-caddy:8080/oidc/token
       LOGTO_RESOURCE: https://alp-default
+      # granted in the D2E portal: System Admin > Users > Edit roles > "JupyterHub User"
       LOGTO_ALLOWED_ROLE: role.jupyteruser
-      LOGTO_EXTRA_SCOPES: db:jupyter_test db:jupyter_test_b
       JUPYTERHUB_HUB_CONNECT_URL: http://pg18d2e-jupyterhub:8081
       DOCKER_NETWORK_NAME: pg18d2e-notebooks
       JUPYTERHUB_NOTEBOOK_IMAGE: pgoauth-notebook:local
-      NOTEBOOK_PGHOST: pg18d2e-pg18
-      NOTEBOOK_PGDATABASE: poc
+      D2E_DATASET_CATALOG: /catalog/datasets.json
       NOTEBOOK_PG_OAUTH_ISSUER: http://d2e-caddy:8080/oidc
       NOTEBOOK_PG_OAUTH_CLIENT_ID: ${POC_HUB_CLIENT_ID:-}
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
       - jupyterhub-data:/srv/jupyterhub/data
+      - catalog:/catalog:ro
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       alp:         # token exchange with d2e-caddy:8080
@@ -78,6 +103,8 @@ services:
 
 volumes:
   pg18-data:
+  pg18-socket:
+  catalog:
   jupyterhub-data:
 
 networks:

@@ -41,6 +41,19 @@ export interface IDataset {
   flowParameters?: DatasetFlowParameters | null;
 }
 
+export interface IJupyterDataset {
+  id: string;
+  name: string;
+  tokenDatasetCode: string;
+  databaseCode: string;
+  host: string;
+  port: number | string;
+  database: string;
+  schema: string;
+  postgresRole: string;
+  sslMode: "verify-full";
+}
+
 // TODO: Remove when we switch from study to dataset entirely
 interface IStudyDto {
   id: string;

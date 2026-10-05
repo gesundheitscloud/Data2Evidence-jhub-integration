@@ -1,0 +1,66 @@
+diff --git a/src/pg_oidc_validator.cpp b/src/pg_oidc_validator.cpp
+index 7ef0a16..770260d 100644
+--- a/src/pg_oidc_validator.cpp
++++ b/src/pg_oidc_validator.cpp
+@@ -40,6 +40,13 @@ static char* authn_field = nullptr;
+ // When non-empty, the validator uses this URL (instead of pg_hba's `issuer=`)
+ static char* discovery_url_override = nullptr;
+ 
++// D2E: when set, a pg_hba line with an empty `scope` authorizes the requested PG role only if the
++// token's <role_claim> array contains it and it starts with <role_prefix>. Empty = upstream behavior.
++static char* role_claim = nullptr;
++static char* role_prefix = nullptr;
++// D2E: when set, the token's `aud` must contain this value.
++static char* audience = nullptr;
++
+ extern "C" void _PG_init() {
+   DefineCustomStringVariable("pg_oidc_validator.authn_field",
+                              gettext_noop("OAuth field used for matching PostgreSQL users"), nullptr, &authn_field,
+@@ -49,6 +56,15 @@ extern "C" void _PG_init() {
+       gettext_noop("If set, fetch OIDC discovery and JWKS from this URL instead of the pg_hba issuer."),
+       gettext_noop("The JWT `iss` claim is still validated against the pg_hba issuer."), &discovery_url_override, "",
+       PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
++  DefineCustomStringVariable("pg_oidc_validator.role_claim",
++                             gettext_noop("JWT array claim listing the PostgreSQL roles a token may log in as"),
++                             gettext_noop("Used only on pg_hba lines with an empty scope and delegate_ident_mapping=1."),
++                             &role_claim, "", PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
++  DefineCustomStringVariable("pg_oidc_validator.role_prefix",
++                             gettext_noop("Only roles with this prefix can be granted through role_claim"), nullptr,
++                             &role_prefix, "role.researcher.", PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
++  DefineCustomStringVariable("pg_oidc_validator.audience", gettext_noop("If set, require this token audience"),
++                             nullptr, &audience, "", PGC_SIGHUP, 0, nullptr, nullptr, nullptr);
+ }
+ 
+ bool validate_token(const ValidatorModuleState* state, const char* token, const char* role,
+@@ -95,7 +111,10 @@ bool validate_token(const ValidatorModuleState* state, const char* token, const
+   const auto jwks_info = http.get_json(jwks_uri);
+   const auto decoded_token = jwt::decode(token);
+   const std::string jwt_kid = decoded_token.get_header_claim("kid").as_string();
+-  const auto verifier = configure_verifier_with_jwks(issuer, jwks_info, jwt_kid);
++  auto verifier = configure_verifier_with_jwks(issuer, jwks_info, jwt_kid);
++  if (audience != nullptr && *audience != '\0') {
++    verifier.with_audience(std::string(audience));
++  }
+   verifier.verify(decoded_token);
+   auto received_scopes = parse_jwt_scopes(decoded_token.get_payload_json()["scp"]);
+   const auto json_scope = parse_jwt_scopes(decoded_token.get_payload_json()["scope"]);
+@@ -132,6 +151,19 @@ bool validate_token(const ValidatorModuleState* state, const char* token, const
+   }
+   PG_END_TRY();
+ 
++  const bool role_mode = required_scopes.empty() && role_claim != nullptr && *role_claim != '\0';
++  if (role_mode) {
++    // authn_id stays the token subject (audit: system_user = oauth:<sub>); the role grant comes from
++    // the signed claim. pg_hba must set delegate_ident_mapping=1 so PostgreSQL uses this decision.
++    const std::string requested(role);
++    const auto granted = payload.contains(role_claim) ? parse_jwt_scopes(payload.at(role_claim)) : scopes_t{};
++    res->authorized = requested.starts_with(role_prefix) && granted.contains(requested);
++    if (!res->authorized) {
++      elog(LOG, "Authorization failed: role \"%s\" is not in token claim \"%s\"", role, role_claim);
++    }
++    return true;
++  }
++
+   if (required_scopes.empty()) {
+     res->authorized = true;
+   } else if (issuer_is_azure(issuer)) {

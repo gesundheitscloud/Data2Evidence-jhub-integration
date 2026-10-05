@@ -132,3 +132,14 @@ test("editing a role clears a lingering 'no changes' banner", async () => {
   fireEvent.click(screen.getByLabelText("Viewer"));
   await waitFor(() => expect(screen.queryByTestId("feedback")).not.toBeInTheDocument());
 });
+
+test("grants JupyterHub access through the existing ALP role endpoint", async () => {
+  api.userMgmt.registerAlpUserRoles.mockResolvedValue(undefined);
+  const onClose = renderDialog();
+
+  fireEvent.click(screen.getByLabelText("JupyterHub User"));
+  fireEvent.click(screen.getByText(UPDATE));
+
+  await waitFor(() => expect(onClose).toHaveBeenCalledWith("success"));
+  expect(api.userMgmt.registerAlpUserRoles).toHaveBeenCalledWith("u1", ["JUPYTER_USER"]);
+});

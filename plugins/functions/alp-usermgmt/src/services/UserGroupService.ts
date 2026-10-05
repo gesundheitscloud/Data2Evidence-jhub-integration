@@ -127,6 +127,7 @@ export class UserGroupService {
         ALP_USER_ADMIN: alpInfo.alp_role_user_admin,
         ALP_SYSTEM_ADMIN: alpInfo.alp_role_system_admin,
         ALP_DASHBOARD_VIEWER: alpInfo.alp_role_dashboard_viewer,
+        JUPYTER_USER: alpInfo.alp_role_jupyter_user,
         TENANT_ADMIN: alpInfo.alp_role_tenant_admin,
         TENANT_VIEWER: alpInfo.alp_role_tenant_viewer,
         STUDY_RESEARCHER: alpInfo.alp_role_study_researcher,
@@ -309,6 +310,7 @@ export class UserGroupService {
       alp_role_user_admin: groups.some(group => group.role === ROLES.ALP_USER_ADMIN),
       alp_role_system_admin: groups.some(group => group.role === ROLES.ALP_SYSTEM_ADMIN),
       alp_role_dashboard_viewer: groups.some(group => group.role === ROLES.ALP_DASHBOARD_VIEWER),
+      alp_role_jupyter_user: groups.some(group => group.role === ROLES.JUPYTER_USER),
       alp_role_study_write_dqd_researcher: groups.some(group => group.role === ROLES.STUDY_WRITE_DQD_RESEARCHER),
       alp_role_study_results_read_researcher: groups.some(group => group.role === ROLES.STUDY_RESULTS_READ_RESEARCHER),
       alp_role_etl_mapping_contributor: groups.some(group => group.role === ROLES.ETL_MAPPING_CONTRIBUTOR),
@@ -457,6 +459,7 @@ export class UserGroupService {
       alp_role_user_admin: false,
       alp_role_system_admin: false,
       alp_role_dashboard_viewer: false,
+      alp_role_jupyter_user: false,
       alp_role_study_write_dqd_researcher: false,
       alp_role_study_results_read_researcher: false,
       alp_role_etl_mapping_contributor: false,
@@ -496,6 +499,9 @@ export class UserGroupService {
           break
         case LOGTO_ROLES.DASHBOARD_VIEWER:
           roleMap.alp_role_dashboard_viewer = true
+          break
+        case LOGTO_ROLES.JUPYTER_USER:
+          roleMap.alp_role_jupyter_user = true
           break
         case LOGTO_ROLES.JOB_RUNNER:
           roleMap.alp_role_study_write_dqd_researcher = true
@@ -551,6 +557,7 @@ export class UserGroupService {
         ALP_USER_ADMIN: roleMap.alp_role_user_admin,
         ALP_SYSTEM_ADMIN: roleMap.alp_role_system_admin,
         ALP_DASHBOARD_VIEWER: roleMap.alp_role_dashboard_viewer,
+        JUPYTER_USER: roleMap.alp_role_jupyter_user,
         TENANT_VIEWER: roleMap.alp_role_tenant_viewer,
         STUDY_RESEARCHER: roleMap.alp_role_study_researcher,
         STUDY_WRITE_DQD_RESEARCHER: roleMap.alp_role_study_write_dqd_researcher,

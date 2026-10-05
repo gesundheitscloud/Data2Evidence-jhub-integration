@@ -1,0 +1,173 @@
+diff --git a/alp-usermgmt/deno.json b/alp-usermgmt/deno.json
+index eb1ef13..717a5ff 100644
+--- a/alp-usermgmt/deno.json
++++ b/alp-usermgmt/deno.json
+@@ -102,6 +102,7 @@
+     "./src/services/roles": "./src/services/roles/index.ts",
+     "./src/services/roles/SystemAdminService": "./src/services/roles/SystemAdminService.ts",
+     "./src/services/roles/DashboardViewerService": "./src/services/roles/DashboardViewerService.ts",
++    "./src/services/roles/JupyterUserService": "./src/services/roles/JupyterUserService.ts",
+     "./src/services/UserGroupService": "./src/services/UserGroupService.ts",
+     "./src/services/UserService": "./src/services/UserService.ts",
+     "./src/services/ConfigService": "./src/services/ConfigService.ts",
+diff --git a/alp-usermgmt/src/const.ts b/alp-usermgmt/src/const.ts
+index 435385a..68ff052 100644
+--- a/alp-usermgmt/src/const.ts
++++ b/alp-usermgmt/src/const.ts
+@@ -4,6 +4,7 @@ export const ROLES = {
+   ALP_USER_ADMIN: 'ALP_USER_ADMIN',
+   ALP_SYSTEM_ADMIN: 'ALP_SYSTEM_ADMIN',
+   ALP_DASHBOARD_VIEWER: 'ALP_DASHBOARD_VIEWER',
++  JUPYTER_USER: 'JUPYTER_USER',
+   ETL_MAPPING_CONTRIBUTOR: 'ETL_MAPPING_CONTRIBUTOR',
+   TENANT_ADMIN: 'TENANT_ADMIN',
+   TENANT_VIEWER: 'TENANT_VIEWER',
+@@ -18,6 +19,7 @@ export const LOGTO_ROLES = {
+   USER_ADMIN: 'role.useradmin',
+   SYSTEM_ADMIN: 'role.systemadmin',
+   DASHBOARD_VIEWER: 'role.dashboardviewer',
++  JUPYTER_USER: 'role.jupyteruser',
+   TENANT_VIEWER: 'role.viewer',
+   RESEARCHER: 'role.researcher',
+   JOB_RUNNER: 'role.jobrunner',
+@@ -29,6 +31,7 @@ export const LOGTO_ROLE_NAMES: Record<string, string> = {
+   [ROLES.ALP_USER_ADMIN]: LOGTO_ROLES.USER_ADMIN,
+   [ROLES.ALP_SYSTEM_ADMIN]: LOGTO_ROLES.SYSTEM_ADMIN,
+   [ROLES.ALP_DASHBOARD_VIEWER]: LOGTO_ROLES.DASHBOARD_VIEWER,
++  [ROLES.JUPYTER_USER]: LOGTO_ROLES.JUPYTER_USER,
+   [ROLES.TENANT_VIEWER]: LOGTO_ROLES.TENANT_VIEWER,
+   [ROLES.STUDY_RESEARCHER]: LOGTO_ROLES.RESEARCHER,
+   [ROLES.STUDY_WRITE_DQD_RESEARCHER]: LOGTO_ROLES.JOB_RUNNER,
+diff --git a/alp-usermgmt/src/routes/AlpUserRouter.ts b/alp-usermgmt/src/routes/AlpUserRouter.ts
+index 38a08d9..cced3e0 100644
+--- a/alp-usermgmt/src/routes/AlpUserRouter.ts
++++ b/alp-usermgmt/src/routes/AlpUserRouter.ts
+@@ -7,7 +7,8 @@ import {
+   DashboardViewerService,
+   JobRunnerService,
+   StudyResultService,
+-  ETLMappingContributorService
++  ETLMappingContributorService,
++  JupyterUserService
+ } from '../services'
+ import { createLogger } from '../Logger'
+ import { User } from '../entities'
+@@ -22,7 +23,8 @@ export class AlpUserRouter {
+     private readonly dashboardViewerService: DashboardViewerService,
+     private readonly jobRunnerService: JobRunnerService,
+     private readonly studyResultService: StudyResultService,
+-    private readonly etlMappingContributorService: ETLMappingContributorService
++    private readonly etlMappingContributorService: ETLMappingContributorService,
++    private readonly jupyterUserService: JupyterUserService
+   ) {
+     this.registerRoutes()
+   }
+@@ -35,6 +37,8 @@ export class AlpUserRouter {
+       try {
+         const userAdmins = await this.userAdminService.getUsers()
+         this.mergeUserWithRoles(alpUsers, userAdmins, ROLES.ALP_USER_ADMIN)
++        const jupyterUsers = await this.jupyterUserService.getUsers()
++        this.mergeUserWithRoles(alpUsers, jupyterUsers, ROLES.JUPYTER_USER)
+ 
+         return res.status(200).json(Object.values(alpUsers))
+       } catch (err) {
+@@ -67,6 +71,9 @@ export class AlpUserRouter {
+         if (roles.includes(ROLES.ETL_MAPPING_CONTRIBUTOR)) {
+           await this.etlMappingContributorService.registerUser(userId)
+         }
++        if (roles.includes(ROLES.JUPYTER_USER)) {
++          await this.jupyterUserService.registerUser(userId)
++        }
+ 
+         return res.status(200).json({ userId })
+       } catch (err) {
+@@ -99,6 +106,9 @@ export class AlpUserRouter {
+         if (roles.includes(ROLES.ETL_MAPPING_CONTRIBUTOR)) {
+           await this.etlMappingContributorService.withdrawUser(userId)
+         }
++        if (roles.includes(ROLES.JUPYTER_USER)) {
++          await this.jupyterUserService.withdrawUser(userId)
++        }
+ 
+         return res.status(200).json({ userId })
+       } catch (err) {
+diff --git a/alp-usermgmt/src/services/roles/JupyterUserService.ts b/alp-usermgmt/src/services/roles/JupyterUserService.ts
+new file mode 100644
+index 0000000..3382d15
+--- /dev/null
++++ b/alp-usermgmt/src/services/roles/JupyterUserService.ts
+@@ -0,0 +1,65 @@
++import type { Knex } from '../../types'
++import { ROLES } from '../../const'
++import { Inject, Service } from 'typedi'
++import { User } from '../../entities'
++import { UserGroupRepository, UserRepository } from '../../repositories'
++import { B2cGroupService } from '../B2cGroupService'
++import { UserGroupService } from '../UserGroupService'
++import { createLogger } from '../../Logger'
++import { IRoleService } from './IRoleService'
++
++@Service()
++export class JupyterUserService implements IRoleService {
++  private static ROLE = ROLES.JUPYTER_USER
++  private readonly logger = createLogger(this.constructor.name)
++
++  constructor(
++    @Inject('DB_CONNECTION') private readonly db: Knex,
++    private readonly userRepo: UserRepository,
++    private readonly userGroupRepo: UserGroupRepository,
++    private readonly groupService: B2cGroupService,
++    private readonly userGroupService: UserGroupService
++  ) {}
++
++  async getUsers(): Promise<User[]> {
++    const subquery = this.db('user_group')
++      .innerJoin('b2c_group', 'user_group.b2c_group_id', 'b2c_group.id')
++      .where('b2c_group.role', JupyterUserService.ROLE)
++      .select('user_group.user_id')
++
++    return await this.db('user')
++      .select()
++      .where('id', 'in', subquery)
++      .then(result => result.map(row => this.userRepo.reducer(row)) || [])
++  }
++
++  async getGroup() {
++    return await this.groupService.getGroupByRole(JupyterUserService.ROLE)
++  }
++
++  async isGranted(userId: string): Promise<boolean> {
++    if (!userId) return false
++    const userGroups = await this.userGroupRepo.getList({ user_id: userId })
++    if (userGroups.length === 0) return false
++    const groups = await this.groupService.getGroupsByIds(userGroups.map(group => group.b2cGroupId))
++    return groups.some(group => group.role === JupyterUserService.ROLE)
++  }
++
++  async registerUser(userId: string) {
++    const group = await this.getGroup()
++    if (!group?.id) {
++      throw new Error(`Unable to find group for role ${JupyterUserService.ROLE}`)
++    }
++    this.logger.info(`Register ${JupyterUserService.ROLE} for ${userId}`)
++    return await this.userGroupService.registerUserToGroup(userId, group.id)
++  }
++
++  async withdrawUser(userId: string) {
++    const group = await this.getGroup()
++    if (!group?.id) {
++      throw new Error(`Unable to find group for role ${JupyterUserService.ROLE}`)
++    }
++    this.logger.info(`Withdraw ${JupyterUserService.ROLE} for ${userId}`)
++    return await this.userGroupService.withdrawUserFromGroup(userId, group.id)
++  }
++}
+diff --git a/alp-usermgmt/src/services/roles/index.ts b/alp-usermgmt/src/services/roles/index.ts
+index 6c68886..dd1c838 100644
+--- a/alp-usermgmt/src/services/roles/index.ts
++++ b/alp-usermgmt/src/services/roles/index.ts
+@@ -4,3 +4,4 @@ export * from './DashboardViewerService'
+ export * from './JobRunnerService'
+ export * from './StudyResultService'
+ export * from './ETLMappingContributorService'
++export * from './JupyterUserService'

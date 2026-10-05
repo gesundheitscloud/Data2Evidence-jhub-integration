@@ -32,7 +32,34 @@ def granted_scopes(auth_state: dict) -> list[str]:
     scopes = token_response.get("scope") or auth_state.get("scope") or []
     if isinstance(scopes, str):
         scopes = scopes.split()
-    return [scope for scope in scopes if isinstance(scope, str)]
+    granted = [scope for scope in scopes if isinstance(scope, str)]
+    access_token = auth_state.get("access_token") or token_response.get("access_token")
+    if isinstance(access_token, str):
+        granted.extend(token_roles(access_token))
+    return list(dict.fromkeys(granted))
+
+
+# D2E's Logto JWT customizer puts the scopes of all the user's roles into the `roles` claim,
+# e.g. role.jupyteruser (granted as "JupyterHub User") and role.researcher.<dataset id>
+def token_roles(access_token: str) -> list[str]:
+    try:
+        part = access_token.split(".")[1]
+        payload = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
+    except (ValueError, IndexError, json.JSONDecodeError):
+        return []
+    roles = payload.get("roles", [])
+    return [role for role in roles if isinstance(role, str)] if isinstance(roles, list) else []
+
+
+# the datasets this user may open: catalog entries (written by pg18-sync) whose PG role is in the token
+def granted_datasets(access_token: str) -> list[dict]:
+    path = os.getenv("D2E_DATASET_CATALOG")
+    if not path or not os.path.exists(path):
+        return []
+    with open(path) as f:
+        catalog = json.load(f)
+    roles = set(token_roles(access_token))
+    return [d for d in catalog if isinstance(d, dict) and d.get("postgresRole") in roles]
 
 
 # swap the stored refresh token for a fresh access token (and the rotated refresh token)
@@ -44,11 +71,13 @@ def refreshed_token_state(auth_state: dict) -> dict:
         f"{quote(required_env('LOGTO_JUPYTERHUB_CLIENT_ID'))}:"
         f"{quote(required_env('LOGTO_JUPYTERHUB_CLIENT_SECRET'))}".encode()
     ).decode()
-    body = urlencode({
+    params = {
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "resource": required_env("LOGTO_RESOURCE"),
-    }).encode()
+    }
+    if os.getenv("LOGTO_RESOURCE"):
+        params["resource"] = os.environ["LOGTO_RESOURCE"]
+    body = urlencode(params).encode()
     request = Request(required_env("LOGTO_TOKEN_URL"), body, {
         "authorization": f"Basic {basic}",
         "content-type": "application/x-www-form-urlencoded",
@@ -71,7 +100,10 @@ async def pass_access_token(spawner, auth_state):
     auth_state = refreshed_token_state(auth_state)
     await spawner.user.save_auth_state(auth_state)  # keep the rotated refresh token
     spawner.environment["LOGTO_ACCESS_TOKEN"] = auth_state["access_token"]
-    for name in ("PGHOST", "PGPORT", "PGDATABASE", "PG_OAUTH_ISSUER", "PG_OAUTH_CLIENT_ID"):
+    spawner.environment["D2E_JUPYTER_DATASETS"] = json.dumps(
+        granted_datasets(auth_state["access_token"]), separators=(",", ":")
+    )
+    for name in ("PG_OAUTH_ISSUER", "PG_OAUTH_CLIENT_ID"):
         value = os.getenv(f"NOTEBOOK_{name}")
         if value:
             spawner.environment[name] = value
@@ -109,12 +141,12 @@ c.GenericOAuthenticator.scope = [
     "profile",
     "email",
     "offline_access",
-    required_env("LOGTO_ALLOWED_ROLE"),
-] + [s for s in os.getenv("LOGTO_EXTRA_SCOPES", "").split() if s]
-# the access token is a JWT for this API resource; PG18 checks its scopes
-c.GenericOAuthenticator.extra_authorize_params = {"resource": required_env("LOGTO_RESOURCE")}
-c.GenericOAuthenticator.token_params = {"resource": required_env("LOGTO_RESOURCE")}
-# [flow 3] the gate: groups = granted scopes, must include LOGTO_ALLOWED_ROLE
+]
+# the access token is a JWT for this API resource (aud); PG18 checks its `roles` claim
+if os.getenv("LOGTO_RESOURCE"):
+    c.GenericOAuthenticator.extra_authorize_params = {"resource": os.environ["LOGTO_RESOURCE"]}
+    c.GenericOAuthenticator.token_params = {"resource": os.environ["LOGTO_RESOURCE"]}
+# [flow 3] the gate: groups = granted scopes + token roles, must include LOGTO_ALLOWED_ROLE
 c.GenericOAuthenticator.manage_groups = True
 c.GenericOAuthenticator.auth_state_groups_key = granted_scopes
 c.GenericOAuthenticator.allowed_groups = {required_env("LOGTO_ALLOWED_ROLE")}

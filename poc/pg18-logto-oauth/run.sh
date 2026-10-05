@@ -1,8 +1,8 @@
 #!/bin/sh
-# [RUN] one command: logto_setup.py -> .env.poc -> build missing files -> start docker-compose.yml
+# [RUN] one command: D2E patch + Logto setup -> .env.poc -> build missing files -> start docker-compose.yml
 # D2E must be running (d2e CLI). Safe to run again.
 #   sh run.sh            # set up and start
-#   sh run.sh --remove   # stop, and remove the PoC users/roles/app from D2E Logto
+#   sh run.sh --remove   # stop, remove the PoC app from D2E Logto, revert the D2E UI/usermgmt patch
 set -eu
 cd "$(dirname "$0")"
 
@@ -17,15 +17,28 @@ if [ "${1:-}" = "--remove" ]; then
   docker compose --env-file .env.poc down -v 2>/dev/null || docker compose down -v
   for c in $(docker ps -aq --filter 'name=^jupyter-'); do docker rm -f "$c" >/dev/null; done
   setup --remove
+  sh d2e-patch/apply.sh --revert
   rm -f .env.poc
   exit 0
 fi
 
-# 1. D2E Logto: roles, users, hub app -> .env.poc (gitignored)
+# 1. D2E: "JupyterHub User" role in usermgmt + portal UI; users whose Logto link broke get it back
+sh d2e-patch/apply.sh
+sh d2e-patch/repair-logto-users.sh >/dev/null
+
+# 2. D2E Logto: hub app -> .env.poc (gitignored), plus what pg18-sync needs to read D2E datasets
 umask 077
-key="$(grep '^POC_HUB_CRYPT_KEY=' .env.poc 2>/dev/null | cut -d= -f2- || true)"
-[ -n "$key" ] || key="$(openssl rand -hex 32)"
-{ setup; echo "POC_HUB_CRYPT_KEY=$key"; } > .env.poc.new
+keep() { grep "^$1=" .env.poc 2>/dev/null | cut -d= -f2- || true; }
+key="$(keep POC_HUB_CRYPT_KEY)"; [ -n "$key" ] || key="$(openssl rand -hex 32)"
+reader="$(keep POC_JUPYTER_READER_PASSWORD)"; [ -n "$reader" ] || reader="$(openssl rand -hex 24)"
+{
+  setup
+  echo "POC_HUB_CRYPT_KEY=$key"
+  echo "POC_JUPYTER_READER_PASSWORD=$reader"
+  echo "POC_MINERVA_URL=postgres://$(docker exec d2e-trex printenv PG_SUPER_USER):$(docker exec d2e-trex printenv PG_SUPER_PASSWORD)@d2e-minerva-postgres-1:5432/alp"
+  # admin URL of D2E's demo database (trex.db code demo_database); only used to create the read-only reader
+  echo "POC_SOURCE_DEMO_DATABASE=$(docker exec d2e-trex printenv REP_PG)"
+} > .env.poc.new
 if ! grep -q '^POC_HUB_CLIENT_ID=' .env.poc.new; then
   rm -f .env.poc.new
   echo "D2E Logto setup failed (no hub client id); see the messages above" >&2
@@ -33,10 +46,10 @@ if ! grep -q '^POC_HUB_CLIENT_ID=' .env.poc.new; then
 fi
 mv .env.poc.new .env.poc
 
-# 2. build what the plain images lack, once
-[ -f validator/out/pg_oidc_validator.so ] || docker build --output validator/out validator
-docker image inspect pgoauth-notebook:local >/dev/null 2>&1 || docker build -t pgoauth-notebook:local notebook
+# 3. build what the plain images lack (the validator again whenever its patch changes)
+[ validator/out/pg_oidc_validator.so -nt validator/d2e-roles.patch ] || docker build --output validator/out validator
+docker build -q -t pgoauth-notebook:local notebook >/dev/null
 
-# 3. start pg18 and the hub
+# 4. start pg18, pg18-sync and the hub
 docker compose --env-file .env.poc up -d --build
-echo "open http://localhost:8000 (accept the https://localhost certificate first)"
+echo "D2E portal: https://localhost/sign-in (admin) | JupyterHub: http://localhost:8000"

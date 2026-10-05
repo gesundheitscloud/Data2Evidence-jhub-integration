@@ -48,5 +48,6 @@ export const IDP_SCOPE_ROLE = {
   SYSTEM_ADMIN: 'role.systemadmin',
   USER_ADMIN: 'role.useradmin',
   DASHBOARD_VIEWER: 'role.dashboardviewer',
+  JUPYTER_USER: 'role.jupyteruser',
   DATASET_RESEARCHER_PREFIX: 'role.researcher.'
 }

@@ -13,6 +13,8 @@ RUN git init /src && cd /src \
     && git fetch --depth 1 origin "$PG_OIDC_VALIDATOR_REF" \
     && git checkout FETCH_HEAD
 WORKDIR /src
+COPY d2e-roles.patch /tmp/d2e-roles.patch
+RUN git apply --check /tmp/d2e-roles.patch && git apply /tmp/d2e-roles.patch
 RUN make USE_PGXS=1 with_llvm=no -j"$(nproc)"
 
 FROM scratch

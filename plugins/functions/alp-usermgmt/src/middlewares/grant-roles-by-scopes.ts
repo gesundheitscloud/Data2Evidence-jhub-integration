@@ -170,6 +170,7 @@ export const grantRolesByScopes = async (req: Request, res: Response, next: Next
       await grantOrRevokeSystemRole(userId, ROLES.ALP_SYSTEM_ADMIN, scopes.includes(IDP_SCOPE_ROLE.SYSTEM_ADMIN))
       await grantOrRevokeSystemRole(userId, ROLES.ALP_USER_ADMIN, scopes.includes(IDP_SCOPE_ROLE.USER_ADMIN))
       await grantOrRevokeSystemRole(userId, ROLES.ALP_DASHBOARD_VIEWER, scopes.includes(IDP_SCOPE_ROLE.DASHBOARD_VIEWER))
+      await grantOrRevokeSystemRole(userId, ROLES.JUPYTER_USER, scopes.includes(IDP_SCOPE_ROLE.JUPYTER_USER))
       
       const allDatasets = await getDatasets()
       // Skip datasets governed by PhysioNet entitlements sync, else this

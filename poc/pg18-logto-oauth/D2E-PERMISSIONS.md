@@ -45,6 +45,13 @@ The only PostgreSQL objects per dataset are created when a schema is created, by
 
 ## Proposed: token-scoped PostgreSQL logins for Jupyter
 
+> **Status (2026-10-05):** the PoC now implements a variant of this. The PG role is
+> `role.researcher.<dataset id>` (created by `sync/sync.sh`), one `pg_hba` line with
+> `delegate_ident_mapping=1` covers all datasets, and the patched validator
+> (`validator/d2e-roles.patch`) reads the `roles` claim instead of `scope` — which removes
+> open issues 2 and 3 below. JupyterHub access is the new D2E role `JUPYTER_USER`
+> (Logto `role.jupyteruser`). See [ARCHITECTURE.md](ARCHITECTURE.md) section 2.
+
 The PoC pattern maps onto D2E's existing names:
 
 | PoC | D2E equivalent |
