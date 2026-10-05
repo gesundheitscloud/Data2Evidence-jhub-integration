@@ -1,7 +1,6 @@
-# How D2E grants database access today, and how PG18 OAuth would fit
+# D2E permissions and PostgreSQL
 
-← [README.md](README.md) · the PoC this maps onto D2E: [ARCHITECTURE.md](ARCHITECTURE.md)
-(roles, scopes, `pg_hba` rules in section 2)
+← [README.md](README.md) · how the PoC works: [ARCHITECTURE.md](ARCHITECTURE.md)
 
 Read from the code on 2026-09-30 (branch `feature/MIM-7-pr`). Paths are relative to the
 repository root.
@@ -43,47 +42,31 @@ The only PostgreSQL objects per dataset are created when a schema is created, by
   with read privileges on the schema
 - skipped entirely when `IS_SELF_MANAGED_ROLES=true`
 
-## Proposed: token-scoped PostgreSQL logins for Jupyter
+## What the PoC adds
 
-> **Status (2026-10-05):** the PoC now implements a variant of this. The PG role is
-> `role.researcher.<dataset id>` (created by `sync/sync.sh`), one `pg_hba` line with
-> `delegate_ident_mapping=1` covers all datasets, and the patched validator
-> (`validator/d2e-roles.patch`) reads the `roles` claim instead of `scope` — which removes
-> open issues 2 and 3 below. JupyterHub access is the new D2E role `JUPYTER_USER`
-> (Logto `role.jupyteruser`). See [ARCHITECTURE.md](ARCHITECTURE.md) section 2.
-
-The PoC pattern maps onto D2E's existing names:
-
-| PoC | D2E equivalent |
+| D2E today | PoC |
 | --- | --- |
-| Logto role `jupyter-test` | `role.researcher.<token_dataset_code>` (already created per dataset grant) |
-| scope `db:jupyter_test` | scope `role.researcher.<token_dataset_code>` (already on that role) |
-| PG login role `jupyter_test` | new `<schema>_jupyter` login, no password, `GRANT <schema>_read_role` |
-| `pg_hba` oauth line | one line per dataset: `host <db> <schema>_jupyter all oauth issuer=<public issuer> scope="role.researcher.<code>" map=d2e` |
-| `pg_ident` map | `d2e /^(.*)$ <schema>_jupyter` per dataset, or one regex map |
+| Researcher grant → Logto role `role.researcher.<code>` with scope `role.researcher.<dataset id>` | unchanged; this scope is the PG18 login permission |
+| no Jupyter permission | new ALP role `JUPYTER_USER` → Logto `role.jupyteruser` (hub gate) |
+| services read data with shared `trex.db` credentials | the user logs in to PG18 as `role.researcher.<dataset id>` with their own token |
+| `<schema>_read_role` per schema | `sync/sync.sh` creates the PG18 role with SELECT on the dataset schema |
+| — | one `pg_hba` line for all datasets; the patched validator matches the requested role against the token's `roles` |
 
-A researcher of dataset X then logs in to the Jupyter hub, the hub requests
-`role.researcher.X`, the notebook connects as `X_jupyter` and can only read schema X,
-through the read role D2E already maintains.
+## Open issues before production
 
-## Open issues before this works in D2E
-
-1. **Which IdP issues the token.** The role store moved to trex (#3371 "Move the IdP onto
-   trex's Better Auth OIDC provider" on develop). The validator needs a JWT access token
-   with `iss`, a JWKS endpoint and a `scope` (or `scp`) claim. That has to be checked for
-   trex's provider; the PoC only proves it for Logto.
-2. **`scope` versus `roles`.** `pg_oidc_validator` checks the `scope` claim. D2E's
-   services read the `roles` claim. The hub must request the dataset scopes explicitly
-   (Logto has no wildcard), so it needs the list of dataset codes, e.g. from the portal
-   API, at login.
-3. **Static `pg_hba`.** Every dataset needs a `pg_hba` line and a login role, then
-   `pg_reload_conf()`. That belongs in the dataset creation flow next to
-   `create_and_assign_roles_task`. The alternative is a custom validator with
-   `delegate_ident_mapping` that reads `roles` and picks the role itself, which means
-   maintaining C/C++ code.
-4. **Public issuer.** Logto's `ENDPOINT` is an internal hostname today
-   (`https://d2e-logto-1.<internal domain>:3001`), so tokens carry an internal `iss`. A
-   PostgreSQL or JupyterHub on another VM fails the issuer check until the issuer is a
-   public HTTPS URL.
-5. **Revocation delay.** Removing a dataset grant stops new logins; issued tokens keep
-   working until they expire. The token lifetime of the resource should be short.
+1. **Which IdP issues the token.** On develop the IdP moves to trex (#3371). The validator needs
+   a JWT access token with `iss`, a JWKS endpoint and the `roles` claim; this PoC proves it only
+   for Logto.
+2. **Public issuer.** Tokens carry `iss=http://d2e-caddy:8080/oidc`, which is reachable only inside
+   `d2e_alp`. PG18 or the hub on another machine needs a public HTTPS issuer, and then libpq no
+   longer needs `PGOAUTHDEBUG=UNSAFE`.
+3. **Datasets on PG18.** The PoC reads PG16 datasets through `postgres_fdw`. In production, the
+   dataset should live on PG18, or the dataset flow should create the role next to
+   `create_and_assign_roles_task`.
+4. **Maintained validator patch.** `validator/d2e-roles.patch` is on top of a pinned
+   `percona/pg_oidc_validator` commit and should go upstream or be owned by D2E.
+5. **Revocation delay.** Removing a grant stops new logins; an issued token works until it
+   expires (1 hour). Keep the resource's token lifetime short.
+6. **Running D2E vs. source.** The UI/usermgmt change is in `plugins/` on this branch, but the
+   running 0.17.0-beta stack is patched in its container (`d2e-patch/`). A D2E release with the
+   branch merged makes `d2e-patch/` unnecessary.

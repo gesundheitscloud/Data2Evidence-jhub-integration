@@ -9,8 +9,7 @@ Users and their grants are NOT made here: a D2E admin creates users and grants
 "JupyterHub User" (-> role.jupyteruser) and dataset Researcher (-> role.researcher.<code>,
 scope role.researcher.<dataset id>) in the D2E portal; usermgmt writes those Logto roles.
 
-Earlier versions of this file made users alice/carol/bob with roles jupyter-test(-b);
-setup deletes those (only users holding a legacy role) so the names can be used in D2E.
+Prints POC_HUB_CLIENT_ID / POC_HUB_CLIENT_SECRET; run.sh writes them to .env.poc.
 
 run.sh calls it in a throwaway container on d2e_alp:
   docker run --rm --network d2e_alp -v "$PWD:/w:ro" -e LOGTO_M2M_ID -e LOGTO_M2M_SECRET \
@@ -26,16 +25,12 @@ import urllib.request
 
 LOGTO = "http://d2e-logto-1:3001"   # D2E Logto inside d2e_alp: /oidc for tokens, /api for management
 RESOURCE = "https://alp-default"     # D2E's API resource; the token's aud
-HUB = "http://localhost:8000"
-APP = "jupyterhub-pg18-poc"
-ROLES = {  # logto role -> scope it carries; the same name usermgmt uses for JUPYTER_USER
-    "role.jupyteruser": "role.jupyteruser",
-}
-LEGACY_ROLES = {"jupyter-test": "db:jupyter_test", "jupyter-test-b": "db:jupyter_test_b"}
-LEGACY_USERS = ["alice", "carol", "bob"]
+HUB = "http://localhost:8000"       # browser URL of the hub; its callback is registered on the app
+APP = "jupyterhub-pg18-poc"          # Logto app name the hub logs in with
+ROLE = "role.jupyteruser"            # Logto role + scope for D2E's JUPYTER_USER (hub gate, LOGTO_ALLOWED_ROLE)
 
 
-# one HTTP call to Logto; returns (status, parsed body)
+# One HTTP call to Logto; returns (status, parsed body).
 def call(path, data=None, method=None, headers=None, form=False, base=None):
     h = dict(headers or {})
     body = None
@@ -65,7 +60,7 @@ def call(path, data=None, method=None, headers=None, form=False, base=None):
             return e.code, raw
 
 
-# stop with a message on an HTTP error
+# Stop with a message on an HTTP error.
 def must(result, what):
     st, body = result
     if st >= 400:
@@ -73,7 +68,7 @@ def must(result, what):
     return body
 
 
-# every item of a list endpoint; /roles and /users return only 20 per page by default
+# Every item of a list endpoint; Logto pages /roles and /users by 20 by default.
 def list_all(path, headers):
     items, page = [], 1
     sep = "&" if "?" in path else "?"
@@ -85,15 +80,17 @@ def list_all(path, headers):
         page += 1
 
 
+# First item whose fields equal `match`, or None.
 def find(items, **match):
     return next((i for i in items if all(i.get(k) == v for k, v in match.items())), None)
 
 
+# Progress to stderr, so stdout carries only the .env.poc lines.
 def log(msg):
     print(msg, file=sys.stderr)
 
 
-# management API token from D2E's M2M app (credentials passed in by run.sh)
+# Management API token from D2E's M2M app (LOGTO_M2M_ID/SECRET, read from d2e-logto-1 by run.sh).
 def management_headers():
     basic = base64.b64encode(
         f"{os.environ['LOGTO_M2M_ID']}:{os.environ['LOGTO_M2M_SECRET']}".encode()
@@ -105,6 +102,7 @@ def management_headers():
     return {"authorization": f"Bearer {token['access_token']}"}
 
 
+# D2E's API resource https://alp-default (the token audience).
 def resource(auth):
     res = find(must(call("/resources", headers=auth), "list resources"), indicator=RESOURCE)
     if res is None:
@@ -112,30 +110,22 @@ def resource(auth):
     return res
 
 
+# Ensure the role.jupyteruser scope/role and the hub app exist; print the app's id and secret.
 def setup(auth):
-    # 1. one scope per role on alp-default, and the role carrying it
+    # 1. scope role.jupyteruser on alp-default and the role carrying it
     res = resource(auth)
-    scopes = list_all(f"/resources/{res['id']}/scopes", auth)
-    roles = list_all("/roles", auth)
-    role_ids = {}
-    for role_name, scope_name in ROLES.items():
-        scope = find(scopes, name=scope_name)
-        if scope is None:
-            scope = must(call(f"/resources/{res['id']}/scopes", {"name": scope_name},
-                              method="POST", headers=auth), f"create scope {scope_name}")
-            log(f"created scope {scope_name}")
-        role = find(roles, name=role_name)
-        if role is None:
-            role = must(call("/roles", {"name": role_name, "description": f"PG18 PoC: {scope_name}",
-                                        "type": "User", "scopeIds": [scope["id"]]},
-                             method="POST", headers=auth), f"create role {role_name}")
-            log(f"created role {role_name}")
-        role_ids[role_name] = role["id"]
+    scope = find(list_all(f"/resources/{res['id']}/scopes", auth), name=ROLE)
+    if scope is None:
+        scope = must(call(f"/resources/{res['id']}/scopes", {"name": ROLE},
+                          method="POST", headers=auth), f"create scope {ROLE}")
+        log(f"created scope {ROLE}")
+    if find(list_all("/roles", auth), name=ROLE) is None:
+        must(call("/roles", {"name": ROLE, "description": "D2E JupyterHub User",
+                             "type": "User", "scopeIds": [scope["id"]]},
+                  method="POST", headers=auth), f"create role {ROLE}")
+        log(f"created role {ROLE}")
 
-    # 2. legacy PoC users/roles from earlier versions
-    remove_legacy(auth, res)
-
-    # 3. the hub's app
+    # 2. the hub's app
     hub = find(must(call("/applications", headers=auth), "list applications"), name=APP)
     if hub is None:
         st, body = call("/applications", {
@@ -156,35 +146,12 @@ def setup(auth):
     print(f"POC_HUB_CLIENT_SECRET={hub['secret']}")
 
 
-def remove_legacy(auth, res):
-    roles = list_all("/roles", auth)
-    legacy = [r for r in roles if r["name"] in LEGACY_ROLES]
-    for username in LEGACY_USERS:
-        user = find(list_all(f"/users?search={username}", auth), username=username)
-        if not user:
-            continue
-        user_roles = must(call(f"/users/{user['id']}/roles", headers=auth), f"roles of {username}")
-        # bob had no role; he is legacy only if he never got a D2E role either
-        if any(r["name"] in LEGACY_ROLES for r in user_roles) or (username == "bob" and not user_roles):
-            call(f"/users/{user['id']}", method="DELETE", headers=auth)
-            log(f"deleted legacy user {username}")
-    for role in legacy:
-        call(f"/roles/{role['id']}", method="DELETE", headers=auth)
-        log(f"deleted legacy role {role['name']}")
-    for scope in list_all(f"/resources/{res['id']}/scopes", auth):
-        if scope["name"] in LEGACY_ROLES.values():
-            call(f"/resources/{res['id']}/scopes/{scope['id']}", method="DELETE", headers=auth)
-            log(f"deleted legacy scope {scope['name']}")
-
-
+# Delete the hub app. role.jupyteruser stays: D2E's JUPYTER_USER grants (usermgmt) point at it.
 def remove(auth):
-    res = resource(auth)
-    remove_legacy(auth, res)
     app = find(must(call("/applications", headers=auth), "list applications"), name=APP)
     if app:
         call(f"/applications/{app['id']}", method="DELETE", headers=auth)
         log(f"deleted app {APP}")
-    # role.jupyteruser stays: D2E's JUPYTER_USER grants (usermgmt) point at it
 
 
 if __name__ == "__main__":

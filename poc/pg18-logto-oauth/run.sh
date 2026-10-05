@@ -6,8 +6,10 @@
 set -eu
 cd "$(dirname "$0")"
 
+# D2E's Logto management app (M2M); logto_setup.py uses it to create the hub app
 export LOGTO_M2M_ID="$(docker exec d2e-logto-1 printenv LOGTO_API_M2M_CLIENT_ID)"
 export LOGTO_M2M_SECRET="$(docker exec d2e-logto-1 printenv LOGTO_API_M2M_CLIENT_SECRET)"
+# Run logto_setup.py in a throwaway container on d2e_alp (where d2e-logto-1 resolves).
 setup() {
   docker run --rm --network d2e_alp -v "$PWD:/w:ro" -e LOGTO_M2M_ID -e LOGTO_M2M_SECRET \
     python:3.12-alpine python /w/logto_setup.py "$@"
@@ -28,13 +30,16 @@ sh d2e-patch/repair-logto-users.sh >/dev/null
 
 # 2. D2E Logto: hub app -> .env.poc (gitignored), plus what pg18-sync needs to read D2E datasets
 umask 077
+# Value of KEY from the current .env.poc, so reruns keep the same secrets.
 keep() { grep "^$1=" .env.poc 2>/dev/null | cut -d= -f2- || true; }
+# POC_HUB_CRYPT_KEY: hub auth_state encryption | POC_JUPYTER_READER_PASSWORD: source DB reader (FDW)
 key="$(keep POC_HUB_CRYPT_KEY)"; [ -n "$key" ] || key="$(openssl rand -hex 32)"
 reader="$(keep POC_JUPYTER_READER_PASSWORD)"; [ -n "$reader" ] || reader="$(openssl rand -hex 24)"
 {
   setup
   echo "POC_HUB_CRYPT_KEY=$key"
   echo "POC_JUPYTER_READER_PASSWORD=$reader"
+  # D2E metadata DB for pg18-sync (portal.dataset, trex.db)
   echo "POC_MINERVA_URL=postgres://$(docker exec d2e-trex printenv PG_SUPER_USER):$(docker exec d2e-trex printenv PG_SUPER_PASSWORD)@d2e-minerva-postgres-1:5432/alp"
   # admin URL of D2E's demo database (trex.db code demo_database); only used to create the read-only reader
   echo "POC_SOURCE_DEMO_DATABASE=$(docker exec d2e-trex printenv REP_PG)"

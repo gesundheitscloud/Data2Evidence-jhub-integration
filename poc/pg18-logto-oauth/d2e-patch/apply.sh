@@ -13,20 +13,20 @@ set -eu
 cd "$(dirname "$0")"
 here="$(pwd)"
 
-TREX=d2e-trex
-FN=/usr/src/bundled-plugins/d2e-functions/alp-usermgmt
-UI=/usr/src/bundled-plugins/d2e-ui/resources/portal
+TREX=d2e-trex                                                  # D2E container serving functions + UI
+FN=/usr/src/bundled-plugins/d2e-functions/alp-usermgmt          # bundled usermgmt function
+UI=/usr/src/bundled-plugins/d2e-ui/resources/portal             # built portal UI
 KEEP=/usr/src/poc-jupyter-orig          # originals, for --revert
 MAIN=main.2576bc4f.js                    # bundle names of the d2e-trex 0.17.0-beta image
 CHUNK=9103.17637b43.chunk.js
 MAIN_NEW=main.2576bc4j.js                # new names, so browsers do not keep the cached originals
 CHUNK_NEW=9103.17637b4j.chunk.js
-FILES="src/const.ts src/routes/AlpUserRouter.ts src/services/roles/index.ts deno.json index.eszip"
-NEW_FILE=src/services/roles/JupyterUserService.ts
+FILES="src/const.ts src/routes/AlpUserRouter.ts src/services/roles/index.ts deno.json index.eszip"  # changed by the patch
+NEW_FILE=src/services/roles/JupyterUserService.ts               # added by the patch
 GROUP_ID=720ad194-fdf3-4d72-b58a-b60d06bd2c91   # same id as plugins/functions/alp-usermgmt-init seed
-restart=""
+restart=""                                                      # set when d2e-trex must reload the bundle
 
-tmp="$(mktemp -d)"
+tmp="$(mktemp -d)"  # host-side work dir: copy out, patch, copy back
 trap 'rm -rf "$tmp"' EXIT
 
 # trex loads each function from its prebuilt index.eszip; restart so the new bundle is used

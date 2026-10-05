@@ -1526,15 +1526,6 @@
           ]
         },
         {
-          "path": "^/system-portal/dataset/list/jupyter$",
-          "scopes": [
-            "portal.dataset.read"
-          ],
-          "httpMethods": [
-            "GET"
-          ]
-        },
-        {
           "path": "^/system-portal/dataset/list$",
           "scopes": [
             "portal.dataset.read"

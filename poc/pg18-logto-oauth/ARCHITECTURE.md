@@ -1,129 +1,110 @@
-# PG18 OAuth PoC: architecture, build order, testing
+# Architecture
 
-← [README.md](README.md) (overview, one-command run, results) ·
-notebook cells: [Jupyter.md](Jupyter.md) ·
-D2E integration: [D2E-PERMISSIONS.md](D2E-PERMISSIONS.md)
+← [README.md](README.md) · test: [Jupyter.md](Jupyter.md)
 
-Goal: a D2E admin grants, in the D2E portal, (1) JupyterHub access and (2) read access to a
-dataset. The user then logs in to JupyterHub with D2E's Logto, and the same Logto access token
-logs them in to PostgreSQL 18, where they can only SELECT the datasets they were granted.
-
-Every code file starts with a one-line header tag. The tags match the sections below:
-`[BUILD-n]`, `[SETUP]`, `[RUN]`, `[FLOW-n]`.
-
-## 1. Architecture
+## 1. Containers
 
 ```text
-                      ┌──────────── D2E stack (already running) ─────────────────────┐
-browser ── https://localhost ──> d2e-caddy ──> d2e-trex (portal UI + usermgmt, patched)│
-   │   (admin grants roles)            │        └─ writes Logto roles ─> d2e-logto-1   │
-   │                                   │           d2e-caddy:8080/oidc = issuer + JWKS │
-   │                                   │  d2e-minerva-postgres-1 (portal.dataset, ...) │
-   │                                   │  d2e-demodb (dataset source, PG16)            │
-   │                      └────────────▲──────────────────▲──────────────▲────────────┘
-   │                       d2e_alp     │ token exchange   │ JWKS         │ FDW (read-only user)
-   └── http://localhost:8000 ──> pg18d2e-jupyterhub      │              │
-                                    │ [FLOW-1] notebook   │   pg18d2e-sync [FLOW-5]
-            pg18d2e-notebooks (internal, no internet)     │      │ mirror + role per dataset
-                                    ▼                     │      ▼
-                             jupyter-<user> ──[FLOW-2] token──> pg18d2e-pg18 [FLOW-3..4]
+admin ─ https://localhost/sign-in ─> d2e-caddy ─> d2e-trex (portal UI + usermgmt, patched)
+                                                     │ writes Logto roles
+                                                     ▼
+                                                  d2e-logto-1 ── issuer + JWKS at d2e-caddy:8080/oidc
+                                                     ▲                     ▲
+user ── http://localhost:8000 ─> pg18d2e-jupyterhub ─┘ login/refresh       │ verify token
+                                    │ spawn                                │
+                                    ▼                                      │
+                       jupyter-<user> ──── token ────> pg18d2e-pg18 ───────┘
+                       (internal network)                 │ postgres_fdw, read-only user
+                                                          ▼
+                       pg18d2e-sync ── reads D2E datasets  d2e-demodb (PG16, dataset source)
 ```
 
-| Container | Image | What it does |
+| Container | Image | Role |
 | --- | --- | --- |
-| `d2e-trex` | D2E's own, **patched** by `d2e-patch/apply.sh` | portal UI shows a "JupyterHub User" role; usermgmt stores it and gives the user the Logto role `role.jupyteruser` |
-| `d2e-logto-1` | D2E's own | Logs users in; JWT access tokens carry all the user's role scopes in the `roles` claim |
-| `pg18d2e-jupyterhub` | built from `hub/` | Logto login, gate on `role.jupyteruser`, starts one notebook per user with the token and the user's granted datasets |
-| `jupyter-<user>` | `pgoauth-notebook:local` | `pg_oauth.connect("demo")` logs in to PostgreSQL with the token |
-| `pg18d2e-pg18` | official `postgres:18-alpine` | Verifies the token with the mounted, patched validator; per dataset a read-only mirror |
-| `pg18d2e-sync` | official `postgres:18-alpine` | `sync/sync.sh` every 15 s: one database, FDW schema mirror and login role per D2E postgres dataset |
+| `d2e-trex` | D2E's, patched by `d2e-patch/apply.sh` | Portal UI shows **JupyterHub User**; usermgmt stores it as group `JUPYTER_USER` and gives the Logto role `role.jupyteruser` |
+| `d2e-logto-1` | D2E's | Login. Access tokens carry every scope of the user's roles in the `roles` claim |
+| `pg18d2e-jupyterhub` | `hub/` | Logto login, lets in only `role.jupyteruser`, starts one notebook per user |
+| `jupyter-<user>` | `notebook/` → `pgoauth-notebook:local` | `pg_oauth.connect()` logs in to PG18 with the token |
+| `pg18d2e-pg18` | `postgres:18-alpine` + `validator/out/pg_oidc_validator.so` | Accepts only D2E tokens, only as roles listed in the token |
+| `pg18d2e-sync` | `postgres:18-alpine` + `sync/sync.sh` | Every 15 s, creates one database, a read-only mirror and a role per D2E postgres dataset |
 
-## 2. Runtime flow
+## 2. What a portal grant becomes
 
-What the admin does in the D2E portal (`https://localhost/sign-in`, user `admin`):
+| Portal grant | usermgmt group | Logto role | Scopes in token `roles` | Used by |
+| --- | --- | --- | --- | --- |
+| JupyterHub User | `JUPYTER_USER` | `role.jupyteruser` | `role.jupyteruser` | hub gate (`LOGTO_ALLOWED_ROLE`) |
+| Researcher on dataset X | `RESEARCHER` + dataset X | `role.researcher.<code>` | `role.researcher.<code>`, `role.researcher.<X id>` | PG18 login as `role.researcher.<X id>` |
 
-| Portal action | usermgmt writes | Logto role (scope in the token's `roles`) | Effect |
-| --- | --- | --- | --- |
-| System Admin > Users > Edit roles > **JupyterHub User** | group `JUPYTER_USER` | `role.jupyteruser` | may log in to JupyterHub |
-| System Admin > Datasets > *dataset* > Permissions > **Researcher** | group `RESEARCHER` of that dataset | `role.researcher.<code>` (scopes `role.researcher.<code>`, `role.researcher.<dataset id>`) | may log in to PG18 as `role.researcher.<dataset id>` |
-
-Then, for the user:
+## 3. Runtime flow
 
 | Step | File | What happens |
 | --- | --- | --- |
-| FLOW-1 | `hub/jupyterhub_config.py` | Browser goes to Logto, comes back with a code; the hub exchanges it for tokens (`resource=https://alp-default`). Without `role.jupyteruser` in the token's `roles` the hub answers 403. At server start the hub refreshes the token, puts it in the notebook as `LOGTO_ACCESS_TOKEN`, and passes the catalog entries whose `postgresRole` is in the token as `D2E_JUPYTER_DATASETS` |
-| FLOW-2 | `notebook/pg_oauth.py` | `connect(dataset)` picks the dataset's role `role.researcher.<id>` and gives the token to libpq 18 through `PQsetAuthDataHook` (no Python driver supports PG18 OAuth yet) |
-| FLOW-3 | `pg18/pg_hba.conf` | One rule: user `/^role\.researcher\.`, method `oauth`, issuer `http://d2e-caddy:8080/oidc`, `scope=""`, `delegate_ident_mapping=1` |
-| FLOW-4 | `validator/d2e-roles.patch` | The validator checks signature, issuer, expiry and audience `https://alp-default`, then authorizes only if the requested role starts with `role.researcher.` and is listed in the token's `roles` claim. The identity stays the token `sub` (`system_user = oauth:<logto user id>`) |
-| FLOW-5 | `sync/sync.sh` | Per D2E postgres dataset: in the source DB a login `d2e_jupyter_reader` with only `SELECT` on the dataset schemas; in PG18 a database `<database_code>`, `postgres_fdw` server, the schema imported as foreign tables, and the role `role.researcher.<dataset id>` with only `CONNECT`, `USAGE`, `SELECT` (and `default_transaction_read_only=on`). Writes `/catalog/datasets.json` for the hub |
+| FLOW-1 | `hub/jupyterhub_config.py` | The user logs in through Logto. The hub requires `role.jupyteruser` in the token's `roles`. At server start it refreshes the token and passes `LOGTO_ACCESS_TOKEN` and `D2E_JUPYTER_DATASETS` (the catalog entries whose role is in the token) |
+| FLOW-2 | `notebook/pg_oauth.py` | `connect(dataset)` logs in as `role.researcher.<id>` and hands the token to libpq 18 via `PQsetAuthDataHook` |
+| FLOW-3 | `pg18/pg_hba.conf` | One rule for every dataset: user `/^role\.researcher\.`, `oauth`, `scope=""`, `delegate_ident_mapping=1` |
+| FLOW-4 | `validator/d2e-roles.patch` | The validator checks signature, issuer, expiry and audience `https://alp-default`. The requested role must start with `role.researcher.` and be in the token's `roles`. The identity stays the token `sub` |
+| FLOW-5 | `sync/sync.sh` | For each dataset: a source reader `d2e_jupyter_reader` (SELECT only), a PG18 database `<database_code>`, an FDW mirror of the schema, the role `role.researcher.<id>` (CONNECT/USAGE/SELECT only), and `/catalog/datasets.json` |
 
-Read-only is enforced twice: the PG18 role has no write, create, temp or ownership
-privilege, and the FDW reads the source as a user that can only `SELECT`.
+## 4. Why it is read-only
 
-## 3. Build and run order
+1. **PG18 privileges.** The role has only `CONNECT`, `USAGE` and `SELECT`: it owns nothing and
+   cannot CREATE, use TEMP or write.
+2. **Read-only default.** `default_transaction_read_only=on` is set on the role, as a guard rail
+   only, because the user can switch it off.
+3. **Source user.** The FDW reads the source as `d2e_jupyter_reader`, which can only `SELECT`.
+4. **Login.** A token can log in only as the dataset roles in its own `roles` claim. Removing a
+   grant takes effect with the next token (at most 1 hour).
 
-Prerequisite: D2E is running (`d2e start`). From `poc/pg18-logto-oauth/`:
+## 5. Why the D2E patch exists
 
-| Order | Step | Command | Produces |
-| --- | --- | --- | --- |
-| 1 | SETUP D2E patch | `sh d2e-patch/apply.sh` (by `run.sh`) | patched usermgmt eszip + portal UI in `d2e-trex`, group `JUPYTER_USER`; restarts `d2e-trex` once |
-| 2 | SETUP D2E users | `sh d2e-patch/repair-logto-users.sh` (by `run.sh`) | usermgmt users re-linked to their Logto user and given the Logto roles of their groups |
-| 3 | SETUP D2E Logto | `logto_setup.py` (by `run.sh`) | role/scope `role.jupyteruser`, hub app; `.env.poc` |
-| 4 | BUILD-1 validator | `docker build --output validator/out validator` | `validator/out/pg_oidc_validator.so` (rebuilt when the patch changes) |
-| 5 | BUILD-2 notebook image | `docker build -t pgoauth-notebook:local notebook` | image `pgoauth-notebook:local` |
-| 6 | BUILD-3 hub + RUN | `docker compose up -d --build` (by `run.sh`) | `pg18d2e-pg18`, `pg18d2e-sync`, `pg18d2e-jupyterhub` |
+The running D2E (d2e CLI, `ghcr.io/ohdsi/d2e-trex:0.17.0-beta`) does not run this repository's
+`plugins/`. It loads each function from a prebuilt `index.eszip` and the UI from a built bundle.
+`d2e-patch/apply.sh` therefore:
 
-`sh run.sh` runs all of it and can be rerun. The D2E patch lives in the `d2e-trex` container's
-filesystem: if the container is recreated (new image, `d2e` reinstall), rerun `run.sh`.
-The patch targets the `0.17.0-beta` bundle names and stops with a message on any other build.
+- applies `d2e-patch/alp-usermgmt.patch` to the bundled usermgmt sources (the same change as
+  `plugins/functions/alp-usermgmt` on this branch), rebuilds `index.eszip` with `trex bundle`,
+  and restarts `d2e-trex`;
+- inserts the `usermgmt.b2c_group` row `JUPYTER_USER`;
+- adds `JUPYTER_USER: "JupyterHub User"` to the built portal JS under new file names, so
+  browsers do not keep the cached old file.
 
-The validator `.so` must match PostgreSQL 18, musl (Alpine) and the CPU architecture; build
-it on the machine that runs it.
+It keeps the originals in the container (`/usr/src/poc-jupyter-orig`) for `--revert`. A new
+`d2e-trex` container loses the patch, so rerun `run.sh`.
 
-## 4. How to test, from zero
-
-1. **Start.** `sh run.sh`.
-2. **Admin.** Open `https://localhost/sign-in` (accept the certificate), sign in as `admin`.
-   - System Admin > Users > **Add user**: `alice`, a password.
-   - alice > Edit roles > tick **JupyterHub User** > Save. The role column shows it.
-   - System Admin > Datasets > *Demo dataset* > Permissions: give alice **Researcher**.
-   - Add `bob` with no roles.
-3. **User.** In a private window open `http://localhost:8000` > **Sign in with Data2Evidence**,
-   sign in as alice. Her server starts.
-4. **Query in a notebook** (more in [Jupyter.md](Jupyter.md)):
-
-```python
-import pg_oauth
-pg_oauth.datasets()                     # [{'tokenDatasetCode': 'demo', ...}]
-conn = pg_oauth.connect("demo")         # logs in as role.researcher.<demo id>
-conn.execute("select count(*) from demo_cdm.person").fetchone()   # (2694,)
-conn.execute("drop table demo_cdm.person")   # denied
-conn.execute("select system_user, current_user").fetchone()  # ('oauth:<alice id>', 'role.researcher.<demo id>')
-```
-
-5. **bob** gets a JupyterHub 403. Give him JupyterHub User but no dataset: he logs in,
-   `pg_oauth.datasets()` is empty, and connecting as the demo role is refused by PG18.
-6. **Revoke.** Remove alice's Researcher permission: after her next token (server restart,
-   at most one hour), the demo role is gone from her token and PG18 refuses her.
-
-Grants are read when the token is issued: after a change, restart the notebook server
-(File > Hub Control Panel > Stop/Start) or log in to the hub again.
-
-On the PostgreSQL side:
+## 6. Operations
 
 ```sh
-docker exec pg18d2e-pg18 psql -U postgres -c "select * from pg_hba_file_rules"
-docker logs pg18d2e-pg18 | grep -E 'method=oauth|Authorization failed'
-docker logs pg18d2e-sync        # one line per catalog change
+sh run.sh                         # set up / update (idempotent)
+sh run.sh --remove                # tear down the PoC, revert the D2E patch
+sh d2e-patch/repair-logto-users.sh    # re-link D2E users to Logto (sign-in loop)
+docker exec pg18d2e-sync sh /sync/sync.sh --once   # one sync pass now
 ```
 
-## 5. File map
+Reset a Logto password (e.g. `admin`, id from `logto.users`):
 
-| Tag | Files |
-| --- | --- |
-| BUILD | `validator/Dockerfile` (+ `validator/d2e-roles.patch`), `notebook/Dockerfile`, `hub/Dockerfile` |
-| SETUP | `d2e-patch/apply.sh` (+ `d2e-patch/alp-usermgmt.patch`), `d2e-patch/repair-logto-users.sh`, `logto_setup.py` |
-| RUN | `run.sh`, `docker-compose.yml` |
-| FLOW | `hub/jupyterhub_config.py`, `notebook/pg_oauth.py`, `pg18/pg_hba.conf`, `validator/d2e-roles.patch`, `sync/sync.sh` |
-| Browser test | [Jupyter.md](Jupyter.md) (cells to paste in a notebook) |
-| Docs | [README.md](README.md), [D2E-PERMISSIONS.md](D2E-PERMISSIONS.md), [ARCHITECTURE-ko.md](ARCHITECTURE-ko.md) |
+```sh
+docker run --rm --network d2e_alp -e ID="$(docker exec d2e-logto-1 printenv LOGTO_API_M2M_CLIENT_ID)" \
+  -e SECRET="$(docker exec d2e-logto-1 printenv LOGTO_API_M2M_CLIENT_SECRET)" python:3.12-alpine python -c '
+import base64,json,os,urllib.request as u,urllib.parse as p
+L="http://d2e-logto-1:3001"; b="Basic "+base64.b64encode((os.environ["ID"]+":"+os.environ["SECRET"]).encode()).decode()
+t=json.load(u.urlopen(u.Request(L+"/oidc/token",p.urlencode({"grant_type":"client_credentials","resource":"https://default.logto.app/api","scope":"all"}).encode(),{"authorization":b})))["access_token"]
+print(u.urlopen(u.Request(L+"/api/users/<USER_ID>/password",json.dumps({"password":"<NEW>"}).encode(),{"authorization":"Bearer "+t,"content-type":"application/json"},method="PATCH")).status)'
+```
+
+## 7. File map
+
+| Tag | File | Role |
+| --- | --- | --- |
+| RUN | `run.sh` | one command: patch D2E, set up Logto, build, start |
+| RUN | `docker-compose.yml` | `pg18`, `pg18-sync`, `jupyterhub`; every env value commented |
+| SETUP | `d2e-patch/apply.sh` | patch the running D2E (usermgmt eszip, portal UI, group row) |
+| SETUP | `d2e-patch/alp-usermgmt.patch` | the usermgmt change, against the bundled 0.17.0-beta sources |
+| SETUP | `d2e-patch/repair-logto-users.sh` | re-link usermgmt users to Logto, restore their Logto roles |
+| SETUP | `logto_setup.py` | Logto app for the hub + `role.jupyteruser` |
+| BUILD-1 | `validator/Dockerfile`, `validator/d2e-roles.patch` | PG18 token validator with the `roles` claim check |
+| BUILD-2 | `notebook/Dockerfile` | notebook image: libpq 18 + psycopg + `pg_oauth.py` |
+| BUILD-3 | `hub/Dockerfile` | hub image: JupyterHub + DockerSpawner + OAuthenticator |
+| FLOW-1 | `hub/jupyterhub_config.py` | hub login gate, token + datasets to the notebook |
+| FLOW-2 | `notebook/pg_oauth.py` | `datasets()`, `connect()` in the notebook |
+| FLOW-3 | `pg18/pg_hba.conf` | the single oauth rule |
+| FLOW-5 | `sync/sync.sh` | dataset mirror + role + catalog |

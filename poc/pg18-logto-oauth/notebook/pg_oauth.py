@@ -10,9 +10,12 @@ libpq 18, which is why the image sets PSYCOPG_IMPL=python and has no psycopg[bin
     conn = pg_oauth.connect("demo")    # token_dataset_code or dataset id; optional if only one
     conn.execute("select * from demo_cdm.person limit 5").fetchall()
 
-The token comes from LOGTO_ACCESS_TOKEN, set by the hub when the server starts.
-It expires after about an hour; restart the server (Hub Control Panel) for a new one.
-New grants also need a server restart: the dataset list is fixed when the server starts.
+Environment, all set by the hub (hub/jupyterhub_config.py, pass_access_token) at server start:
+    LOGTO_ACCESS_TOKEN    D2E access token; libpq sends it to PG18 (expires after about an hour)
+    D2E_JUPYTER_DATASETS  JSON list of the user's granted datasets (host, database, schema, postgresRole)
+    PG_OAUTH_ISSUER       issuer libpq names to PG18 (must match pg_hba's issuer)
+    PG_OAUTH_CLIENT_ID    OAuth client id libpq requires (the hub's Logto app)
+New grants or an expired token: restart the server from File > Hub Control Panel.
 """
 import base64
 import ctypes
@@ -23,11 +26,11 @@ import time
 
 import psycopg
 
-_PQAUTHDATA_OAUTH_BEARER_TOKEN = 1  # PGauthData in libpq-fe.h (18)
+_PQAUTHDATA_OAUTH_BEARER_TOKEN = 1  # PGauthData in libpq-fe.h (18): "libpq needs a bearer token"
 
 
+# PGoauthBearerRequest from libpq-fe.h (18): the struct libpq passes to the hook; we fill `token`.
 class _BearerRequest(ctypes.Structure):
-    # PGoauthBearerRequest from libpq-fe.h (18)
     _fields_ = [
         ("openid_configuration", ctypes.c_char_p),
         ("scope", ctypes.c_char_p),
@@ -49,11 +52,11 @@ if _libpq.PQlibVersion() < 180000:
 _HOOK = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)
 _libpq.PQdefaultAuthDataHook.restype = ctypes.c_int
 _libpq.PQdefaultAuthDataHook.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p]
-_current_token = None
+_current_token = None  # token the hook hands to libpq; set by connect()
 
 
+# libpq auth-data hook: answer token requests with _current_token, pass anything else to libpq's default.
 def _hook(kind, conn, data):
-    # libpq asks for a token: hand it the one we hold; anything else goes to libpq's default
     if kind == _PQAUTHDATA_OAUTH_BEARER_TOKEN and _current_token:
         request = ctypes.cast(data, ctypes.POINTER(_BearerRequest)).contents
         request.token = _libc.strdup(_current_token.encode())  # small leak per connection
@@ -65,8 +68,8 @@ _hook_ref = _HOOK(_hook)  # keep a reference, or the callback gets garbage colle
 _libpq.PQsetAuthDataHook(_hook_ref)
 
 
+# The access token from the hub; raises if missing or expired.
 def token():
-    """The access token from the hub, checked for expiry."""
     value = os.environ.get("LOGTO_ACCESS_TOKEN")
     if not value:
         raise RuntimeError("LOGTO_ACCESS_TOKEN is not set; the hub did not pass a token")
@@ -75,26 +78,22 @@ def token():
     return value
 
 
+# Decoded token claims (sub, roles, exp, ...), for inspection only: no signature check, PG18 does that.
 def claims(value=None):
-    """Decoded claims of the token, for inspection only (no signature check)."""
     part = (value or os.environ.get("LOGTO_ACCESS_TOKEN", "")).split(".")
     if len(part) != 3:
         raise RuntimeError("the access token is not a JWT")
     return json.loads(base64.urlsafe_b64decode(part[1] + "=" * (-len(part[1]) % 4)))
 
 
-def scopes():
-    return set(claims(token()).get("scope", "").split())
-
-
+# The token's `roles` claim: role.jupyteruser, role.researcher.<dataset id>, ...
 def roles():
-    """Role names carried by the D2E token."""
     value = claims(token()).get("roles", [])
     return set(value if isinstance(value, list) else [])
 
 
+# Datasets a D2E admin granted this user (Researcher), as the hub passed them at server start.
 def datasets():
-    """Return the D2E datasets granted to this user when the server started."""
     raw = os.environ.get("D2E_JUPYTER_DATASETS", "[]")
     try:
         value = json.loads(raw)
@@ -105,6 +104,7 @@ def datasets():
     return value
 
 
+# One granted dataset by token_dataset_code or id; with no argument, the only one granted.
 def _select_dataset(identifier=None):
     available = datasets()
     if not available:
@@ -124,8 +124,8 @@ def _select_dataset(identifier=None):
     return matches[0]
 
 
+# Read-only psycopg connection to a granted dataset, logged in to PG18 as role.researcher.<dataset id>.
 def connect(dataset=None, **kwargs):
-    """Read-only connection to a granted D2E dataset, logged in as role.researcher.<dataset id>."""
     global _current_token
     connection = _select_dataset(dataset)
     role = connection["postgresRole"]
@@ -146,5 +146,5 @@ def connect(dataset=None, **kwargs):
         "oauth_client_id": os.environ["PG_OAUTH_CLIENT_ID"],
         "autocommit": True,
     }
-    params.update(kwargs)
+    params.update(kwargs)  # e.g. options="-c statement_timeout=60000"
     return psycopg.connect(**params)

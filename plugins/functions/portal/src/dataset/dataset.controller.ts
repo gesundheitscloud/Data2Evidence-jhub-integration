@@ -15,8 +15,7 @@ import {
   DATASET_SYSTEM_ADMIN_ROLE,
 } from "../common/const.ts";
 import { RequestContextMiddleware } from "../common/request-context.middleware.ts";
-import { IDataset, IJupyterDataset } from "../types.d.ts";
-import { getJupyterConnectionByCode } from "../env.ts";
+import { IDataset } from "../types.d.ts";
 import { DatasetCommandService } from "./command/dataset-command.service.ts";
 import { DatasetFilterService } from "./dataset-filter.service.ts";
 import { DatasetDetailMetadataUpdateDto } from "./dto/dataset-detail-metadata.update.dto.ts";
@@ -75,29 +74,6 @@ export class DatasetController {
     return await this.datasetQueryService.getDatasets({
       ...queryParams,
       role: DATASET_RESEARCHER_ROLE,
-    });
-  }
-
-  @Get("list/jupyter")
-  async getJupyterDatasets(): Promise<IJupyterDataset[]> {
-    const datasets = await this.datasetQueryService.getDatasets({
-      role: DATASET_RESEARCHER_ROLE,
-    });
-
-    return datasets.flatMap((dataset: IDataset) => {
-      if (dataset.dialect !== "postgres" || !dataset.schemaName) return [];
-      const connection = getJupyterConnectionByCode(dataset.databaseCode);
-      if (!connection) return [];
-      return [{
-        id: dataset.id,
-        name: dataset.studyDetail.name,
-        tokenDatasetCode: dataset.tokenStudyCode,
-        databaseCode: dataset.databaseCode,
-        ...connection,
-        schema: dataset.schemaName,
-        postgresRole: `role.researcher.${dataset.id}`,
-        sslMode: "verify-full" as const,
-      }];
     });
   }
 

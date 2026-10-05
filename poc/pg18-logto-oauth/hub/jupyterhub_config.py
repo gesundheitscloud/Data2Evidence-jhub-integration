@@ -1,15 +1,14 @@
-# [FLOW-1] hub: Logto login, gate on the hub scope, refresh the token at spawn and put it in the notebook env
-# JupyterHub for the PG18 OAuth PoC: log in with Logto, hand the notebook the Logto token.
-# Copied into the hub image (hub/Dockerfile), not mounted: rebuild after editing.
+# [FLOW-1] hub: Logto login, gate on role.jupyteruser, at spawn give the notebook a fresh token + the user's granted datasets
+# Copied into the hub image (hub/Dockerfile), not mounted: rebuild (sh run.sh) after editing.
 #
 # runtime flow for one user
-#   [flow 1] browser -> logto login page
-#   [flow 2] logto -> hub callback, hub gets tokens
-#   [flow 3] hub checks the hub-access scope (LOGTO_ALLOWED_ROLE)
+#   [flow 1] browser -> D2E Logto login page
+#   [flow 2] Logto -> hub callback, hub gets tokens
+#   [flow 3] hub checks the token's `roles` for LOGTO_ALLOWED_ROLE (D2E "JupyterHub User")
 #   [flow 4] hub stores tokens (auth_state, encrypted with JUPYTERHUB_CRYPT_KEY)
-#   [flow 5] user clicks start -> hook runs, refreshes the token
-#   [flow 6] notebook container starts with LOGTO_ACCESS_TOKEN; pg_oauth.py logs in to PG18
-#   [flow 7] logout
+#   [flow 5] server start -> pass_access_token refreshes the token, filters the dataset catalog
+#   [flow 6] notebook container starts; pg_oauth.connect() logs in to PG18 with the token
+#   [flow 7] logout stops the container
 import base64
 import json
 import os
@@ -17,7 +16,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 
-# get all env(.env)
+# Env value or a clear startup error; every value comes from docker-compose.yml.
 def required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -25,22 +24,7 @@ def required_env(name: str) -> str:
     return value
 
 
-# map logto's granted scopes into jupyterhub groups
-def granted_scopes(auth_state: dict) -> list[str]:
-    # [flow 3] called on every login
-    token_response = auth_state.get("token_response") or {}
-    scopes = token_response.get("scope") or auth_state.get("scope") or []
-    if isinstance(scopes, str):
-        scopes = scopes.split()
-    granted = [scope for scope in scopes if isinstance(scope, str)]
-    access_token = auth_state.get("access_token") or token_response.get("access_token")
-    if isinstance(access_token, str):
-        granted.extend(token_roles(access_token))
-    return list(dict.fromkeys(granted))
-
-
-# D2E's Logto JWT customizer puts the scopes of all the user's roles into the `roles` claim,
-# e.g. role.jupyteruser (granted as "JupyterHub User") and role.researcher.<dataset id>
+# The `roles` claim of a D2E access token: scopes of all the user's Logto roles (role.jupyteruser, role.researcher.<id>, ...).
 def token_roles(access_token: str) -> list[str]:
     try:
         part = access_token.split(".")[1]
@@ -51,10 +35,15 @@ def token_roles(access_token: str) -> list[str]:
     return [role for role in roles if isinstance(role, str)] if isinstance(roles, list) else []
 
 
-# the datasets this user may open: catalog entries (written by pg18-sync) whose PG role is in the token
+# [flow 3] JupyterHub groups of the user = token roles; allowed_groups below lets in only LOGTO_ALLOWED_ROLE.
+def user_groups(auth_state: dict) -> list[str]:
+    return token_roles(auth_state.get("access_token") or "")
+
+
+# Catalog entries (written by pg18-sync) whose postgresRole is in the token: the datasets this user may open.
 def granted_datasets(access_token: str) -> list[dict]:
-    path = os.getenv("D2E_DATASET_CATALOG")
-    if not path or not os.path.exists(path):
+    path = required_env("D2E_DATASET_CATALOG")
+    if not os.path.exists(path):
         return []
     with open(path) as f:
         catalog = json.load(f)
@@ -62,7 +51,7 @@ def granted_datasets(access_token: str) -> list[dict]:
     return [d for d in catalog if isinstance(d, dict) and d.get("postgresRole") in roles]
 
 
-# swap the stored refresh token for a fresh access token (and the rotated refresh token)
+# Swap the stored refresh token for a fresh access token, so new D2E grants and a full hour reach the notebook.
 def refreshed_token_state(auth_state: dict) -> dict:
     refresh_token = auth_state.get("refresh_token")
     if not refresh_token:
@@ -71,13 +60,11 @@ def refreshed_token_state(auth_state: dict) -> dict:
         f"{quote(required_env('LOGTO_JUPYTERHUB_CLIENT_ID'))}:"
         f"{quote(required_env('LOGTO_JUPYTERHUB_CLIENT_SECRET'))}".encode()
     ).decode()
-    params = {
+    body = urlencode({
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-    }
-    if os.getenv("LOGTO_RESOURCE"):
-        params["resource"] = os.environ["LOGTO_RESOURCE"]
-    body = urlencode(params).encode()
+        "resource": required_env("LOGTO_RESOURCE"),
+    }).encode()
     request = Request(required_env("LOGTO_TOKEN_URL"), body, {
         "authorization": f"Basic {basic}",
         "content-type": "application/x-www-form-urlencoded",
@@ -91,10 +78,8 @@ def refreshed_token_state(auth_state: dict) -> dict:
     }
 
 
-# [flow 5] called by jupyterhub right before the notebook container is created
+# [flow 5] Spawner hook: notebook env gets the access token, granted datasets and PG18 OAuth settings (never the refresh token or secret).
 async def pass_access_token(spawner, auth_state):
-    # only the fresh access token and where to connect go to the notebook,
-    # never the refresh token or the client secret
     if not auth_state:
         return
     auth_state = refreshed_token_state(auth_state)
@@ -103,57 +88,47 @@ async def pass_access_token(spawner, auth_state):
     spawner.environment["D2E_JUPYTER_DATASETS"] = json.dumps(
         granted_datasets(auth_state["access_token"]), separators=(",", ":")
     )
-    for name in ("PG_OAUTH_ISSUER", "PG_OAUTH_CLIENT_ID"):
-        value = os.getenv(f"NOTEBOOK_{name}")
-        if value:
-            spawner.environment[name] = value
+    spawner.environment["PG_OAUTH_ISSUER"] = required_env("NOTEBOOK_PG_OAUTH_ISSUER")
+    spawner.environment["PG_OAUTH_CLIENT_ID"] = required_env("NOTEBOOK_PG_OAUTH_CLIENT_ID")
 
 
 c = get_config()  # noqa: F821 - provided by JupyterHub at runtime
 
-c.JupyterHub.bind_url = "http://0.0.0.0:8000"  # public
-c.JupyterHub.hub_bind_url = "http://0.0.0.0:8081"  # hub api <- notebook
-c.JupyterHub.hub_connect_url = required_env("JUPYTERHUB_HUB_CONNECT_URL")
+c.JupyterHub.bind_url = "http://0.0.0.0:8000"  # browser -> hub (published as localhost:8000)
+c.JupyterHub.hub_bind_url = "http://0.0.0.0:8081"  # notebook -> hub API
+c.JupyterHub.hub_connect_url = required_env("JUPYTERHUB_HUB_CONNECT_URL")  # how notebooks reach the hub API
 c.JupyterHub.cookie_secret_file = "/srv/jupyterhub/data/jupyterhub_cookie_secret"
 c.JupyterHub.db_url = "sqlite:////srv/jupyterhub/data/jupyterhub.sqlite"
 
 # [flow 4] keep the tokens; without a crypt key nothing is stored and no token reaches the notebook
 c.Authenticator.enable_auth_state = bool(os.getenv("JUPYTERHUB_CRYPT_KEY"))
-# periodic re-validation re-decodes the expired id token and fails; role is re-read at each login
+# periodic re-validation re-decodes the expired id token and fails; roles are re-read at each login
 c.Authenticator.auth_refresh_age = 0
 
 c.JupyterHub.authenticator_class = "generic-oauth"
-c.GenericOAuthenticator.client_id = required_env("LOGTO_JUPYTERHUB_CLIENT_ID")
+c.GenericOAuthenticator.client_id = required_env("LOGTO_JUPYTERHUB_CLIENT_ID")  # Logto app jupyterhub-pg18-poc
 c.GenericOAuthenticator.client_secret = required_env("LOGTO_JUPYTERHUB_CLIENT_SECRET")
-# [flow 2] logto sends the browser back here; must equal the redirect uri registered in logto
+# [flow 2] Logto sends the browser back here; must equal the redirect uri registered by logto_setup.py
 c.GenericOAuthenticator.oauth_callback_url = required_env("JUPYTERHUB_OAUTH_CALLBACK_URL")
-# [flow 1] browser is sent here to log in
+# [flow 1] browser-facing Logto authorize endpoint
 c.GenericOAuthenticator.authorize_url = required_env("LOGTO_AUTHORIZE_URL")
-# [flow 2] hub swaps the code for tokens here, server to server
+# [flow 2] server-to-server token endpoint (same host as the token's iss)
 c.GenericOAuthenticator.token_url = required_env("LOGTO_TOKEN_URL")
 c.GenericOAuthenticator.userdata_from_id_token = True
-c.GenericOAuthenticator.username_claim = os.getenv("LOGTO_USERNAME_CLAIM", "username")
-c.GenericOAuthenticator.login_service = "Data2Evidence"  # "Sign in with Data2Evidence"
-
-# [flow 1] scopes asked for; logto grants only the ones the user's roles hold
-c.GenericOAuthenticator.scope = [
-    "openid",
-    "profile",
-    "email",
-    "offline_access",
-]
-# the access token is a JWT for this API resource (aud); PG18 checks its `roles` claim
-if os.getenv("LOGTO_RESOURCE"):
-    c.GenericOAuthenticator.extra_authorize_params = {"resource": os.environ["LOGTO_RESOURCE"]}
-    c.GenericOAuthenticator.token_params = {"resource": os.environ["LOGTO_RESOURCE"]}
-# [flow 3] the gate: groups = granted scopes + token roles, must include LOGTO_ALLOWED_ROLE
+c.GenericOAuthenticator.username_claim = "username"  # hub user name = D2E/Logto username
+c.GenericOAuthenticator.login_service = "Data2Evidence"  # button "Sign in with Data2Evidence"
+c.GenericOAuthenticator.scope = ["openid", "profile", "email", "offline_access"]
+# the access token is a JWT for D2E's API resource (aud=https://alp-default); PG18 requires that audience
+c.GenericOAuthenticator.extra_authorize_params = {"resource": required_env("LOGTO_RESOURCE")}
+c.GenericOAuthenticator.token_params = {"resource": required_env("LOGTO_RESOURCE")}
+# [flow 3] the gate
 c.GenericOAuthenticator.manage_groups = True
-c.GenericOAuthenticator.auth_state_groups_key = granted_scopes
+c.GenericOAuthenticator.auth_state_groups_key = user_groups
 c.GenericOAuthenticator.allowed_groups = {required_env("LOGTO_ALLOWED_ROLE")}
 c.GenericOAuthenticator.allow_all = False
 c.GenericOAuthenticator.allow_existing_users = False
 c.GenericOAuthenticator.custom_403_message = (
-    "Your account is valid, but it does not have the JupyterHub access role."
+    "Your account is valid, but it does not have the JupyterHub User role in D2E."
 )
 
 # [flow 7] stop the user's notebook container on logout
@@ -164,12 +139,12 @@ c.Spawner.auth_state_hook = pass_access_token
 
 # [flow 6] one docker container per user, on the internal notebook network only
 c.JupyterHub.spawner_class = "dockerspawner.DockerSpawner"
-c.DockerSpawner.image = required_env("JUPYTERHUB_NOTEBOOK_IMAGE")
-c.DockerSpawner.network_name = required_env("DOCKER_NETWORK_NAME")
+c.DockerSpawner.image = required_env("JUPYTERHUB_NOTEBOOK_IMAGE")  # pgoauth-notebook:local
+c.DockerSpawner.network_name = required_env("DOCKER_NETWORK_NAME")  # pg18d2e-notebooks (internal)
 c.DockerSpawner.use_internal_ip = True
 c.DockerSpawner.remove = True
 c.DockerSpawner.notebook_dir = "/home/jovyan/work"
-c.DockerSpawner.volumes = {"jupyterhub-user-{username}": "/home/jovyan/work"}
+c.DockerSpawner.volumes = {"jupyterhub-user-{username}": "/home/jovyan/work"}  # user's files survive restarts
 c.DockerSpawner.mem_limit = "1G"
 c.DockerSpawner.cpu_limit = 1.0
 c.Spawner.default_url = "/lab"
