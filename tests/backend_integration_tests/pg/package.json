@@ -44,7 +44,7 @@
   "resolutions": {
     "lodash": "^4.17.21",
     "minimatch": "^3.1.4",
-    "handlebars": "^4.7.9",
+    "handlebars": "^4.7.10",
     "ajv": "^6.12.6",
     "braces": "^3.0.3",
     "tough-cookie": "^4.1.4",
