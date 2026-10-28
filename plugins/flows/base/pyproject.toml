@@ -25,7 +25,7 @@ dependencies = [
     "prefect-shell==0.3.1",
     "psycopg2-binary==2.9.9",
     "pydantic==2.10.6",
-    "pyjwt==2.13.0",
+    "pyjwt==2.15.0",
     "sqlalchemy==2.0.38",
     "sqlalchemy-bigquery==1.14.1",
     "shinylive==0.8.5",
