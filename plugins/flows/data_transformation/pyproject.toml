@@ -36,7 +36,7 @@ dependencies = [
     "xmltodict==0.14.2",
     "xvfbwrapper>=0.2.15",
     "Cython==3.2.3",
-    "setuptools==83.0.0",
+    "setuptools==84.1.0",
     "wheel==0.46.2",
     "pyarrow==23.0.1",
     "wfdb==4.3.1",
