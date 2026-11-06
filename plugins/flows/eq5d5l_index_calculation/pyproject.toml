@@ -18,7 +18,7 @@ dependencies = [
     # prefecthq/prefect:3.6.10 image ships.
     "fastapi==0.128.0",
     "pandas==2.2.2",
-    "prefect[docker,shell]==3.6.10",
+    "prefect[docker,shell]==3.6.28.dev2",
     "psycopg2-binary==2.9.9",
     "pydantic==2.10.6",
     "pyjwt==2.13.0",
